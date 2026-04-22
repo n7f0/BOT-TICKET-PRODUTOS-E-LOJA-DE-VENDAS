@@ -4,8 +4,8 @@ from discord.ext import commands
 from discord.ui import Modal, TextInput, Button, View
 
 # ================= CONFIGURAÇÕES =================
-TOKEN = os.getenv("TOKEN")  # Pega do ambiente - NUNCA coloque o token aqui!
-CANAL_PRODUTOS_ID = 1494142109123346542
+TOKEN = os.getenv("NOVIDADES_TOKEN")
+CANAL_PRODUTOS_ID = int(os.getenv("CANAL_PRODUTOS_ID", "0"))
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -31,14 +31,14 @@ class NovidadeModal(Modal, title="📢 Criar Nova Novidade"):
     
     cargo1 = TextInput(
         label="👥 PRIMEIRO CARGO",
-        placeholder="Ex: @Membros  ou  @Equipe  ou  ID do cargo",
+        placeholder="Ex: @Membros ou ID do cargo",
         required=True,
         max_length=100
     )
     
     cargo2 = TextInput(
         label="👥 SEGUNDO CARGO",
-        placeholder="Ex: @Vips  ou  @Apoiadores  ou  ID do cargo",
+        placeholder="Ex: @Vips ou ID do cargo",
         required=True,
         max_length=100
     )
@@ -50,13 +50,13 @@ class NovidadeModal(Modal, title="📢 Criar Nova Novidade"):
         
         if not canal_produtos:
             await interaction.followup.send(
-                f"❌ Canal de produtos não encontrado! Verifique o ID: {CANAL_PRODUTOS_ID}",
+                f"❌ Canal de produtos não encontrado! ID: {CANAL_PRODUTOS_ID}",
                 ephemeral=True
             )
             return
         
-        if not isinstance(canal_produtos, (discord.TextChannel, discord.Thread)):
-            await interaction.followup.send("❌ O canal de produtos não é um canal de texto válido!", ephemeral=True)
+        if not isinstance(canal_produtos, discord.TextChannel):
+            await interaction.followup.send("❌ Canal inválido!", ephemeral=True)
             return
         
         cargo1_menção = self.formatar_mencao_cargo(self.cargo1.value, interaction.guild)
@@ -75,18 +75,15 @@ class NovidadeModal(Modal, title="📢 Criar Nova Novidade"):
         if interaction.guild and interaction.guild.icon:
             embed.set_thumbnail(url=interaction.guild.icon.url)
         
-        embed.color = discord.Color.from_rgb(59, 130, 246)
-        
         try:
             mensagem = f"{cargo1_menção} {cargo2_menção}\n"
             await canal_produtos.send(mensagem, embed=embed)
             await interaction.followup.send(
-                f"✅ Novidade publicada com sucesso em {canal_produtos.mention}!\n"
-                f"📌 Cargos mencionados: {cargo1_menção} {cargo2_menção}",
+                f"✅ Novidade publicada em {canal_produtos.mention}!",
                 ephemeral=True
             )
         except Exception as e:
-            await interaction.followup.send(f"❌ Erro ao publicar: {str(e)}", ephemeral=True)
+            await interaction.followup.send(f"❌ Erro: {str(e)}", ephemeral=True)
     
     def formatar_mencao_cargo(self, texto: str, guild: discord.Guild) -> str:
         texto = texto.strip()
@@ -132,7 +129,7 @@ class NovidadeView(View):
         super().__init__(timeout=None)
         self.add_item(NovidadeButton())
 
-# ================= COMANDO !NOVIDADES =================
+# ================= COMANDOS =================
 @bot.command(name="novidades")
 async def comando_novidades(ctx):
     """Mostra o botão para criar novidades"""
@@ -143,69 +140,42 @@ async def comando_novidades(ctx):
                    "**Você poderá:**\n"
                    "📌 Escrever título e conteúdo\n"
                    "👥 Mencionar **DOIS CARGOS** diferentes\n"
-                   "🎨 O bot publica com design automático\n\n"
-                   f"📢 **As novidades serão postadas em:** {bot.get_channel(CANAL_PRODUTOS_ID).mention if bot.get_channel(CANAL_PRODUTOS_ID) else 'Canal configurado'}",
+                   "🎨 O bot publica com design automático",
         color=discord.Color.green()
     )
     
-    embed.set_footer(text="Clique no botão abaixo para começar • Sistema de Novidades")
-    embed.set_thumbnail(url=ctx.guild.icon.url if ctx.guild.icon else None)
-    
-    cargos_importantes = []
-    for role in ctx.guild.roles:
-        if not role.is_default() and len(cargos_importantes) < 5:
-            cargos_importantes.append(role.mention)
-    
-    if cargos_importantes:
-        embed.add_field(
-            name="📌 Cargos disponíveis no servidor",
-            value=", ".join(cargos_importantes[:5]) + ("..." if len(cargos_importantes) > 5 else ""),
-            inline=False
-        )
+    embed.set_footer(text="Clique no botão abaixo para começar")
     
     view = NovidadeView()
     await ctx.send(embed=embed, view=view)
 
-# ================= COMANDO PARA TESTAR O CANAL =================
 @bot.command(name="testar_canal")
 async def testar_canal(ctx):
-    """Testa se o canal de produtos está configurado corretamente"""
+    """Testa se o canal está configurado"""
     canal = bot.get_channel(CANAL_PRODUTOS_ID)
     if canal:
         embed = discord.Embed(
             title="✅ Canal Configurado",
-            description=f"O canal de produtos é: {canal.mention}\n"
-                       f"ID: `{CANAL_PRODUTOS_ID}`\n"
-                       f"Tipo: {type(canal).__name__}",
+            description=f"Canal: {canal.mention}\nID: `{CANAL_PRODUTOS_ID}`",
             color=discord.Color.green()
         )
         await ctx.send(embed=embed)
     else:
         embed = discord.Embed(
-            title="❌ Erro na Configuração",
-            description=f"Não foi possível encontrar o canal com ID: `{CANAL_PRODUTOS_ID}`\n"
-                       f"Verifique se o ID está correto e se o bot está no servidor certo.",
+            title="❌ Erro",
+            description=f"Canal não encontrado! ID: `{CANAL_PRODUTOS_ID}`",
             color=discord.Color.red()
         )
         await ctx.send(embed=embed)
 
-# ================= EVENTO DE INICIALIZAÇÃO =================
 @bot.event
 async def on_ready():
-    await bot.tree.sync()
-    print(f"✅ Bot logado como {bot.user}")
-    print(f"📌 Comandos sincronizados!")
-    print(f"📢 Canal de produtos configurado: {CANAL_PRODUTOS_ID}")
-    
-    canal = bot.get_channel(CANAL_PRODUTOS_ID)
-    if canal:
-        print(f"✅ Canal de produtos encontrado: {canal.name}")
-    else:
-        print(f"❌ ATENÇÃO: Canal de produtos NÃO encontrado! Verifique o ID.")
-    
-    print(f"\n🎯 Comandos disponíveis:")
-    print(f"   !novidades - Mostra o botão para criar novidades")
-    print(f"   !testar_canal - Testa a configuração do canal")
+    print(f"✅ Bot de Novidades online: {bot.user}")
+    print(f"📢 Canal de produtos: {CANAL_PRODUTOS_ID}")
 
 if __name__ == "__main__":
-    bot.run(TOKEN)
+    if not TOKEN:
+        print("❌ Token do bot de novidades não configurado!")
+    else:
+        print("🚀 Iniciando Bot de Novidades...")
+        bot.run(TOKEN)
