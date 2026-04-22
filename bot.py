@@ -6,26 +6,46 @@ import aiohttp
 import mercadopago
 import uuid
 import asyncio
+import os
 from datetime import datetime, timezone
 from aiohttp import web
 
-# ================= CONFIG =================
-CARGO_DONO = 1486353931087908874
-CANAL_STATS = 1494068657762996325
-CANAL_FALHAS = 1494068657762996326
-WEBHOOK_LOG = "https://discord.com/api/webhooks/1492726811891859526/O0lg0DRR_Ftmfj5wUTgxvZg0da1RyWdeHLtSKQAe1XMaxrnY29fbnLoKodQFBccJs_o_"
+# ================= CONFIG (VIA VARIÁVEIS DE AMBIENTE) =================
+CARGO_DONO = int(os.getenv("CARGO_DONO", "0"))
+CANAL_STATS = int(os.getenv("CANAL_STATS", "0"))
+CANAL_FALHAS = int(os.getenv("CANAL_FALHAS", "0"))
+WEBHOOK_LOG = os.getenv("WEBHOOK_LOG", "")
 
-with open("config.json", "r", encoding="utf-8") as f:
-    config = json.load(f)
+DISCORD_TOKEN = os.getenv("LOJA_DISCORD_TOKEN")
+MERCADO_PAGO_TOKEN = os.getenv("MERCADO_PAGO_TOKEN")
 
-config.setdefault("produtos", {})
-config.setdefault("estatisticas", {})
-config.setdefault("pedidos", {})
-config.setdefault("entregues", [])
-config.setdefault("pedidos_pendentes_entrega", {})
+if not DISCORD_TOKEN:
+    print("❌ ERRO: LOJA_DISCORD_TOKEN não configurado!")
+    exit(1)
+
+if not MERCADO_PAGO_TOKEN:
+    print("❌ ERRO: MERCADO_PAGO_TOKEN não configurado!")
+    exit(1)
+
+# Arquivo de dados persistente
+CONFIG_FILE = "loja_config.json"
+
+def carregar_config():
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {
+        "produtos": {},
+        "estatisticas": {"vendas": 0, "faturamento": 0.0},
+        "pedidos": {},
+        "entregues": [],
+        "pedidos_pendentes_entrega": {}
+    }
+
+config = carregar_config()
 
 def salvar():
-    with open("config.json", "w", encoding="utf-8") as f:
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=4, ensure_ascii=False)
 
 def formatar_preco(valor):
@@ -37,7 +57,7 @@ def formatar_preco(valor):
 def eh_dono(interaction: discord.Interaction) -> bool:
     return any(r.id == CARGO_DONO for r in interaction.user.roles)
 
-sdk = mercadopago.SDK(config["mercado_pago_token"])
+sdk = mercadopago.SDK(MERCADO_PAGO_TOKEN)
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -135,6 +155,9 @@ class LogView(discord.ui.View):
         self.add_item(discord.ui.Button(label="👤 Ver Perfil", url=f"https://discord.com/users/{user_id}"))
 
 async def enviar_log(tipo, usuario=None, produto=None, valor=None, extra=None):
+    if not WEBHOOK_LOG:
+        return
+    
     titulo = {"pedido": "🟡 NOVO PEDIDO", "venda": "🟢 VENDA APROVADA", "erro": "🔴 ERRO"}[tipo]
     cor = {"pedido": Color.gold(), "venda": Color.green(), "erro": Color.red()}[tipo]
 
@@ -306,7 +329,7 @@ class SelectRemoverProdutos(discord.ui.Select):
         super().__init__(placeholder="Escolha o produto para remover...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
-        key = self.value
+        key = self.values[0]
         if key not in config["produtos"]:
             return await interaction.response.send_message("❌ Produto não encontrado.", ephemeral=True)
         del config["produtos"][key]
@@ -477,9 +500,9 @@ async def start_web():
     app.router.add_post("/mp", mp_webhook)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", 8080)
+    site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", "8080")))
     await site.start()
-    print("Webhook MP rodando na porta 8080")
+    print(f"✅ Webhook MP rodando na porta {os.getenv('PORT', '8080')}")
 
 # ================= COMANDOS =================
 @bot.command()
@@ -492,4 +515,26 @@ async def atualizar_sistema():
     await atualizar_painel_privado()
 
 # ================= EVENTS =================
-@bot.e
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+    await bot.process_commands(message)
+
+@bot.event
+async def on_ready():
+    try:
+        bot.add_view(PainelPrincipal())
+        if not atualizar_sistema.is_running():
+            atualizar_sistema.start()
+        await atualizar_painel_privado()
+        print(f"✅ Bot da Loja online: {bot.user}")
+    except Exception as e:
+        print(f"[ERRO on_ready] {e}")
+
+async def main():
+    await start_web()
+    await bot.start(DISCORD_TOKEN)
+
+if __name__ == "__main__":
+    asyncio.run(main())
