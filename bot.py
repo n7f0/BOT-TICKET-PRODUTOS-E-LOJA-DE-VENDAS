@@ -1,7 +1,7 @@
 # bot.py - PRIMEIRA LINHA
 import sys
 if sys.version_info >= (3, 13):
-    import patch  # Importa o patch para Python 3.13
+    import patch
 
 import discord
 from discord.ext import commands, tasks
@@ -19,7 +19,8 @@ from aiohttp import web
 
 # ================= CONFIG =================
 CARGO_DONO    = int(os.getenv("CARGO_DONO", "0"))
-CANAL_STATS   = int(os.getenv("CANAL_STATS", "0"))
+CANAL_LOJA    = int(os.getenv("CANAL_LOJA", "1491798819958948000"))     # Canal da loja (produtos)
+CANAL_VENDAS  = int(os.getenv("CANAL_VENDAS", "1494068657762996325"))   # Canal de estatísticas
 CANAL_FALHAS  = int(os.getenv("CANAL_FALHAS", "0"))
 WEBHOOK_LOG   = os.getenv("WEBHOOK_LOG", "")
 DISCORD_TOKEN = os.getenv("LOJA_DISCORD_TOKEN")
@@ -50,76 +51,82 @@ SCHEMA_VERSION = 3
 
 async def init_db():
     global db_pool
-    db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
-    async with db_pool.acquire() as conn:
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS schema_version (
-                versao INTEGER PRIMARY KEY
-            );
-
-            CREATE TABLE IF NOT EXISTS produtos (
-                id          TEXT PRIMARY KEY,
-                nome        TEXT NOT NULL,
-                preco       NUMERIC(10,2) NOT NULL,
-                emoji       TEXT DEFAULT '🛒',
-                link        TEXT NOT NULL,
-                estoque     INTEGER DEFAULT -1,
-                vendas      INTEGER DEFAULT 0,
-                criado_em   TIMESTAMPTZ DEFAULT NOW()
-            );
-
-            CREATE TABLE IF NOT EXISTS pedidos (
-                id              TEXT PRIMARY KEY,
-                user_id         BIGINT NOT NULL,
-                user_tag        TEXT,
-                produto_id      TEXT NOT NULL,
-                produto_nome    TEXT NOT NULL,
-                produto_preco   NUMERIC(10,2) NOT NULL,
-                status          TEXT DEFAULT 'pendente',
-                entregue        BOOLEAN DEFAULT FALSE,
-                tentativas      INTEGER DEFAULT 0,
-                criado_em       TIMESTAMPTZ DEFAULT NOW(),
-                atualizado_em   TIMESTAMPTZ DEFAULT NOW()
-            );
-
-            CREATE TABLE IF NOT EXISTS estatisticas (
-                chave TEXT PRIMARY KEY,
-                valor TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS painel_ids (
-                nome   TEXT PRIMARY KEY,
-                msg_id BIGINT NOT NULL
-            );
-
-            INSERT INTO estatisticas (chave, valor)
-            VALUES ('vendas','0'),('faturamento','0.0'),('vendas_hoje','0'),('faturamento_hoje','0.0'),('ultima_reset','')
-            ON CONFLICT (chave) DO NOTHING;
-        """)
-        
-        row = await conn.fetchrow("SELECT versao FROM schema_version LIMIT 1")
-        versao_atual = row["versao"] if row else 0
-
-        if versao_atual < 1:
-            await conn.execute("ALTER TABLE produtos ADD COLUMN IF NOT EXISTS estoque INTEGER DEFAULT -1")
-            await conn.execute("ALTER TABLE produtos ADD COLUMN IF NOT EXISTS vendas INTEGER DEFAULT 0")
-        if versao_atual < 2:
-            await conn.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS tentativas INTEGER DEFAULT 0")
-        if versao_atual < 3:
+    try:
+        db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
+        async with db_pool.acquire() as conn:
             await conn.execute("""
+                CREATE TABLE IF NOT EXISTS schema_version (
+                    versao INTEGER PRIMARY KEY
+                );
+
+                CREATE TABLE IF NOT EXISTS produtos (
+                    id          TEXT PRIMARY KEY,
+                    nome        TEXT NOT NULL,
+                    preco       NUMERIC(10,2) NOT NULL,
+                    emoji       TEXT DEFAULT '🛒',
+                    link        TEXT NOT NULL,
+                    estoque     INTEGER DEFAULT -1,
+                    vendas      INTEGER DEFAULT 0,
+                    criado_em   TIMESTAMPTZ DEFAULT NOW()
+                );
+
+                CREATE TABLE IF NOT EXISTS pedidos (
+                    id              TEXT PRIMARY KEY,
+                    user_id         BIGINT NOT NULL,
+                    user_tag        TEXT,
+                    produto_id      TEXT NOT NULL,
+                    produto_nome    TEXT NOT NULL,
+                    produto_preco   NUMERIC(10,2) NOT NULL,
+                    status          TEXT DEFAULT 'pendente',
+                    entregue        BOOLEAN DEFAULT FALSE,
+                    tentativas      INTEGER DEFAULT 0,
+                    criado_em       TIMESTAMPTZ DEFAULT NOW(),
+                    atualizado_em   TIMESTAMPTZ DEFAULT NOW()
+                );
+
+                CREATE TABLE IF NOT EXISTS estatisticas (
+                    chave TEXT PRIMARY KEY,
+                    valor TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS painel_ids (
+                    nome   TEXT PRIMARY KEY,
+                    msg_id BIGINT NOT NULL
+                );
+
                 INSERT INTO estatisticas (chave, valor)
-                VALUES ('vendas_hoje','0'),('faturamento_hoje','0.0'),('ultima_reset','')
-                ON CONFLICT (chave) DO NOTHING
+                VALUES ('vendas','0'),('faturamento','0.0'),('vendas_hoje','0'),('faturamento_hoje','0.0'),('ultima_reset','')
+                ON CONFLICT (chave) DO NOTHING;
             """)
+            
+            row = await conn.fetchrow("SELECT versao FROM schema_version LIMIT 1")
+            versao_atual = row["versao"] if row else 0
 
-        await conn.execute("""
-            INSERT INTO schema_version (versao) VALUES ($1)
-            ON CONFLICT (versao) DO UPDATE SET versao=$1
-        """, SCHEMA_VERSION)
+            if versao_atual < 1:
+                await conn.execute("ALTER TABLE produtos ADD COLUMN IF NOT EXISTS estoque INTEGER DEFAULT -1")
+                await conn.execute("ALTER TABLE produtos ADD COLUMN IF NOT EXISTS vendas INTEGER DEFAULT 0")
+            if versao_atual < 2:
+                await conn.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS tentativas INTEGER DEFAULT 0")
+            if versao_atual < 3:
+                await conn.execute("""
+                    INSERT INTO estatisticas (chave, valor)
+                    VALUES ('vendas_hoje','0'),('faturamento_hoje','0.0'),('ultima_reset','')
+                    ON CONFLICT (chave) DO NOTHING
+                """)
 
-    print(f"✅ Banco de dados inicializado (schema v{SCHEMA_VERSION}).")
+            await conn.execute("""
+                INSERT INTO schema_version (versao) VALUES ($1)
+                ON CONFLICT (versao) DO UPDATE SET versao=$1
+            """, SCHEMA_VERSION)
+
+        print(f"✅ Banco de dados inicializado (schema v{SCHEMA_VERSION}).")
+    except Exception as e:
+        print(f"❌ Erro ao conectar ao banco: {e}")
+        db_pool = None
 
 async def db_listar_produtos() -> dict:
+    if not db_pool:
+        return {}
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT * FROM produtos ORDER BY criado_em")
     return {r["id"]: dict(r) for r in rows}
@@ -298,7 +305,8 @@ def registrar_cooldown(user_id: int):
     cooldowns[user_id] = datetime.now(timezone.utc)
 
 # ================= EMBEDS =================
-async def montar_embed_privado():
+async def montar_embed_vendas():
+    """Painel de estatísticas de vendas"""
     vendas           = await db_get_stat("vendas")
     faturamento      = await db_get_stat("faturamento")
     vendas_hoje      = await db_get_stat("vendas_hoje")
@@ -306,7 +314,7 @@ async def montar_embed_privado():
     mais_vendido     = await db_produto_mais_vendido()
     falhas           = await db_pedidos_falha_pendentes()
 
-    embed = Embed(title="📊 PAINEL PRIVADO", color=Color.dark_gold(),
+    embed = Embed(title="📊 PAINEL DE VENDAS", color=Color.dark_gold(),
                   timestamp=datetime.now(timezone.utc))
     embed.add_field(name="📦 Vendas Totais",   value=str(int(vendas)),                   inline=True)
     embed.add_field(name="💰 Faturamento Total",value=f"R$ {formatar_preco(faturamento)}", inline=True)
@@ -331,6 +339,7 @@ async def montar_embed_privado():
     return embed
 
 async def montar_embed_loja():
+    """Painel da loja com produtos"""
     produtos = await db_listar_produtos()
     embed = Embed(title="🛒 NEXZY STORE",
                   description="💎 Compre automaticamente via PIX",
@@ -393,37 +402,11 @@ class PainelPrincipal(discord.ui.View):
             embed.add_field(name=f"{status_emoji(p['status'])} {p['produto_nome']}", value=f"ID: `{p['id']}`\nValor: R$ {formatar_preco(p['produto_preco'])}\nData: {p['criado_em'].strftime('%d/%m/%Y %H:%M')}", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
     
-    @discord.ui.button(label="🎁 Resgatar", style=discord.ButtonStyle.primary, custom_id="btn_resgatar", row=1)
-    async def btn_resgatar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(ResgatarModal())
-    
     @discord.ui.button(label="👑 Admin", style=discord.ButtonStyle.danger, custom_id="btn_admin", row=1)
     async def btn_admin(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not eh_dono(interaction):
             return await interaction.response.send_message("❌ Apenas administradores podem acessar.", ephemeral=True)
         await interaction.response.send_message(embed=await montar_embed_admin(), view=AdminView(), ephemeral=True)
-
-class ResgatarModal(discord.ui.Modal, title="🎁 Resgatar Produto"):
-    codigo = discord.ui.TextInput(label="Código de Resgate", placeholder="Cole seu código aqui...", style=discord.TextStyle.paragraph)
-    
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.send_message("⏳ Verificando código...", ephemeral=True)
-        codigo = self.codigo.value.strip()
-        async with db_pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT * FROM pedidos WHERE id=$1 AND status='aprovado' AND entregue=false", codigo)
-            if not row:
-                return await interaction.edit_original_response(content="❌ Código inválido ou já resgatado!", embed=None, view=None)
-            produto = await db_listar_produtos()
-            prod = produto.get(row["produto_id"])
-            if prod:
-                embed = Embed(title="🎁 Produto Resgatado!", color=Color.green())
-                embed.add_field(name="📦 Produto", value=row["produto_nome"], inline=False)
-                embed.add_field(name="🔗 Link", value=f"[Clique aqui]({prod['link']})", inline=False)
-                await interaction.user.send(embed=embed)
-                await conn.execute("UPDATE pedidos SET entregue=true WHERE id=$1", codigo)
-                await interaction.edit_original_response(content="✅ Produto resgatado! Verifique sua DM.", embed=None, view=None)
-            else:
-                await interaction.edit_original_response(content="❌ Produto não encontrado!", embed=None, view=None)
 
 class AdminView(discord.ui.View):
     def __init__(self):
@@ -431,53 +414,54 @@ class AdminView(discord.ui.View):
     
     @discord.ui.button(label="➕ Adicionar Produto", style=discord.ButtonStyle.success)
     async def add_produto(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(AdicionarProdutoModal())
+        try:
+            await interaction.response.send_modal(AdicionarProdutoModal())
+        except Exception as e:
+            print(f"Erro ao abrir modal: {e}")
+            await interaction.response.send_message("❌ Erro ao abrir formulário. Tente novamente.", ephemeral=True)
     
     @discord.ui.button(label="✏️ Editar Produto", style=discord.ButtonStyle.primary)
     async def edit_produto(self, interaction: discord.Interaction, button: discord.ui.Button):
         produtos = await db_listar_produtos()
         if not produtos:
             return await interaction.response.send_message("❌ Nenhum produto cadastrado.", ephemeral=True)
-        view = SelecionarProdutoEditar(produtos)
-        await interaction.response.send_message("Selecione o produto para editar:", view=view, ephemeral=True)
+        
+        view = discord.ui.View(timeout=60)
+        select = discord.ui.Select(placeholder="Selecione um produto para editar...")
+        for pid, prod in produtos.items():
+            select.add_option(label=f"{prod['nome']} - R$ {prod['preco']}", value=pid, emoji=prod.get('emoji', '🛒'))
+        
+        async def select_callback(interaction: discord.Interaction):
+            await interaction.response.send_modal(EditarProdutoModal(select.values[0]))
+        
+        select.callback = select_callback
+        view.add_item(select)
+        await interaction.response.send_message("Selecione o produto:", view=view, ephemeral=True)
     
     @discord.ui.button(label="🗑️ Remover Produto", style=discord.ButtonStyle.danger)
     async def remove_produto(self, interaction: discord.Interaction, button: discord.ui.Button):
         produtos = await db_listar_produtos()
         if not produtos:
             return await interaction.response.send_message("❌ Nenhum produto cadastrado.", ephemeral=True)
-        view = SelecionarProdutoRemover(produtos)
+        
+        view = discord.ui.View(timeout=60)
+        select = discord.ui.Select(placeholder="Selecione um produto para remover...")
+        for pid, prod in produtos.items():
+            select.add_option(label=f"{prod['nome']} - R$ {prod['preco']}", value=pid, emoji=prod.get('emoji', '🛒'))
+        
+        async def select_callback(interaction: discord.Interaction):
+            await db_remover_produto(select.values[0])
+            await interaction.response.send_message("✅ Produto removido com sucesso!", ephemeral=True)
+            await atualizar_painel_loja()
+        
+        select.callback = select_callback
+        view.add_item(select)
         await interaction.response.send_message("Selecione o produto para remover:", view=view, ephemeral=True)
     
     @discord.ui.button(label="📊 Estatísticas", style=discord.ButtonStyle.secondary)
     async def stats(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = await montar_embed_privado()
+        embed = await montar_embed_vendas()
         await interaction.response.send_message(embed=embed, ephemeral=True)
-
-class SelecionarProdutoEditar(discord.ui.View):
-    def __init__(self, produtos: dict):
-        super().__init__(timeout=60)
-        self.select = discord.ui.Select(placeholder="Selecione um produto...")
-        for pid, prod in produtos.items():
-            self.select.add_option(label=f"{prod['nome']} - R$ {prod['preco']}", value=pid, emoji=prod.get('emoji', '🛒'))
-        self.select.callback = self.select_callback
-        self.add_item(self.select)
-    
-    async def select_callback(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(EditarProdutoModal(self.select.values[0]))
-
-class SelecionarProdutoRemover(discord.ui.View):
-    def __init__(self, produtos: dict):
-        super().__init__(timeout=60)
-        self.select = discord.ui.Select(placeholder="Selecione um produto...")
-        for pid, prod in produtos.items():
-            self.select.add_option(label=f"{prod['nome']} - R$ {prod['preco']}", value=pid, emoji=prod.get('emoji', '🛒'))
-        self.select.callback = self.select_callback
-        self.add_item(self.select)
-    
-    async def select_callback(self, interaction: discord.Interaction):
-        await db_remover_produto(self.select.values[0])
-        await interaction.response.send_message("✅ Produto removido com sucesso!", ephemeral=True)
 
 class AdicionarProdutoModal(discord.ui.Modal, title="Adicionar Produto"):
     pid = discord.ui.TextInput(label="ID do Produto", placeholder="ex: produto1", required=True)
@@ -489,32 +473,36 @@ class AdicionarProdutoModal(discord.ui.Modal, title="Adicionar Produto"):
     
     async def on_submit(self, interaction: discord.Interaction):
         try:
+            await interaction.response.defer(ephemeral=True)
             preco_float = float(self.preco.value.replace(",", "."))
             estoque_int = int(self.estoque.value)
             await db_adicionar_produto(self.pid.value, self.nome.value, preco_float, self.emoji.value, self.link.value, estoque_int)
-            await interaction.response.send_message(f"✅ Produto `{self.pid.value}` adicionado!", ephemeral=True)
+            await interaction.followup.send(f"✅ Produto `{self.pid.value}` adicionado!", ephemeral=True)
             await atualizar_painel_loja()
+            await atualizar_painel_vendas()
         except Exception as e:
-            await interaction.response.send_message(f"❌ Erro: {e}", ephemeral=True)
+            await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
 
 class EditarProdutoModal(discord.ui.Modal, title="Editar Produto"):
     def __init__(self, produto_id):
         super().__init__()
         self.produto_id = produto_id
-    
-    nome = discord.ui.TextInput(label="Nome", required=True)
-    preco = discord.ui.TextInput(label="Preço", required=True)
-    estoque = discord.ui.TextInput(label="Estoque (-1 = Ilimitado)", required=True)
+        
+        self.nome = discord.ui.TextInput(label="Nome", required=True)
+        self.preco = discord.ui.TextInput(label="Preço", required=True)
+        self.estoque = discord.ui.TextInput(label="Estoque (-1 = Ilimitado)", required=True)
     
     async def on_submit(self, interaction: discord.Interaction):
         try:
+            await interaction.response.defer(ephemeral=True)
             preco_float = float(self.preco.value.replace(",", "."))
             estoque_int = int(self.estoque.value)
             await db_editar_produto(self.produto_id, self.nome.value, preco_float, estoque_int)
-            await interaction.response.send_message(f"✅ Produto `{self.produto_id}` editado!", ephemeral=True)
+            await interaction.followup.send(f"✅ Produto `{self.produto_id}` editado!", ephemeral=True)
             await atualizar_painel_loja()
+            await atualizar_painel_vendas()
         except Exception as e:
-            await interaction.response.send_message(f"❌ Erro: {e}", ephemeral=True)
+            await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
 
 async def processar_compra(interaction: discord.Interaction, key: str):
     restante = verificar_cooldown(interaction.user.id)
@@ -583,7 +571,7 @@ async def verificar_pagamento(payment_id, pedido_id, user, produto, produto_key)
                     await db_decrementar_estoque(produto_key)
                     await db_incrementar_venda(float(produto["preco"]))
                     await enviar_log("venda", user, produto, produto["preco"])
-                    await atualizar_painel_privado()
+                    await atualizar_painel_vendas()
                     await atualizar_painel_loja()
                 else:
                     await db_marcar_falha_entrega(pedido_id)
@@ -643,13 +631,14 @@ async def montar_embed_admin():
         embed.add_field(name=f"{prod.get('emoji','🛒')} {prod['nome']}", value=f"ID: `{pid}`\nPreço: R$ {formatar_preco(prod['preco'])}\nEstoque: {prod['estoque'] if prod['estoque'] != -1 else '∞'}\nVendas: {prod['vendas']}", inline=True)
     return embed
 
-async def atualizar_painel_privado():
-    canal = bot.get_channel(CANAL_STATS)
+async def atualizar_painel_vendas():
+    """Atualiza o painel de estatísticas no canal de vendas"""
+    canal = bot.get_channel(CANAL_VENDAS)
     if not canal:
-        print(f"⚠️ Canal {CANAL_STATS} não encontrado!")
+        print(f"⚠️ Canal de vendas {CANAL_VENDAS} não encontrado!")
         return
-    embed = await montar_embed_privado()
-    msg_id = await db_get_painel_id("privado")
+    embed = await montar_embed_vendas()
+    msg_id = await db_get_painel_id("vendas")
     try:
         if msg_id:
             msg = await canal.fetch_message(msg_id)
@@ -658,12 +647,13 @@ async def atualizar_painel_privado():
     except:
         pass
     msg = await canal.send(embed=embed)
-    await db_set_painel_id("privado", msg.id)
+    await db_set_painel_id("vendas", msg.id)
 
 async def atualizar_painel_loja():
-    canal = bot.get_channel(CANAL_STATS)
+    """Atualiza o painel da loja no canal da loja"""
+    canal = bot.get_channel(CANAL_LOJA)
     if not canal:
-        print(f"⚠️ Canal {CANAL_STATS} não encontrado!")
+        print(f"⚠️ Canal da loja {CANAL_LOJA} não encontrado!")
         return
     embed = await montar_embed_loja()
     msg_id = await db_get_painel_id("loja")
@@ -680,7 +670,7 @@ async def atualizar_painel_loja():
 # ================= TASKS =================
 @tasks.loop(minutes=2)
 async def atualizar_paineis():
-    await atualizar_painel_privado()
+    await atualizar_painel_vendas()
     await atualizar_painel_loja()
 
 @tasks.loop(minutes=60)
@@ -719,7 +709,7 @@ async def webhook_handler(request):
                             await db_marcar_entregue(pedido_id)
                             await db_decrementar_estoque(pedido["produto_id"])
                             await db_incrementar_venda(pedido["produto_preco"])
-                            await atualizar_painel_privado()
+                            await atualizar_painel_vendas()
                             await atualizar_painel_loja()
                         else:
                             await db_marcar_falha_entrega(pedido_id)
@@ -750,7 +740,16 @@ async def cmd_loja(ctx):
     view = PainelPrincipal()
     await ctx.send(embed=embed, view=view)
     
-    # Tenta deletar o comando (opcional)
+    try:
+        await ctx.message.delete()
+    except:
+        pass
+
+@bot.command(name="vendas")
+async def cmd_vendas(ctx):
+    """Envia o painel de vendas no canal atual"""
+    embed = await montar_embed_vendas()
+    await ctx.send(embed=embed)
     try:
         await ctx.message.delete()
     except:
@@ -771,7 +770,7 @@ async def cmd_lojaadmin(ctx):
 @commands.has_role(CARGO_DONO)
 async def sync_commands(ctx):
     """Sincroniza os comandos (apenas donos)"""
-    await ctx.send("✅ Comandos disponíveis: `!loja`, `!lojaadmin`, `!testar`, `!sync`", delete_after=10)
+    await ctx.send("✅ Comandos disponíveis: `!loja`, `!vendas`, `!lojaadmin`, `!testar`, `!sync`", delete_after=10)
     try:
         await ctx.message.delete()
     except:
@@ -789,10 +788,17 @@ async def testar_config(ctx):
         inline=False
     )
     
-    canal_stats = bot.get_channel(CANAL_STATS)
+    canal_loja = bot.get_channel(CANAL_LOJA)
     embed.add_field(
-        name="Canal Stats (Loja)", 
-        value=f"{canal_stats.mention if canal_stats else '❌ Não encontrado'}\nID: `{CANAL_STATS}`",
+        name="Canal da Loja (Produtos)", 
+        value=f"{canal_loja.mention if canal_loja else '❌ Não encontrado'}\nID: `{CANAL_LOJA}`",
+        inline=False
+    )
+    
+    canal_vendas = bot.get_channel(CANAL_VENDAS)
+    embed.add_field(
+        name="Canal de Vendas (Estatísticas)", 
+        value=f"{canal_vendas.mention if canal_vendas else '❌ Não encontrado'}\nID: `{CANAL_VENDAS}`",
         inline=False
     )
     
@@ -823,13 +829,20 @@ async def testar_config(ctx):
 @bot.event
 async def on_ready():
     print(f"✅ Bot logado como {bot.user}")
-    print(f"📊 Canal Stats: {CANAL_STATS}")
+    print(f"🛒 Canal da Loja (Produtos): {CANAL_LOJA}")
+    print(f"📊 Canal de Vendas (Estatísticas): {CANAL_VENDAS}")
     print(f"👑 Cargo Dono: {CARGO_DONO}")
     print(f"⚠️ Canal Falhas: {CANAL_FALHAS}")
     
+    # Tentar conectar ao banco
     await init_db()
+    
+    if db_pool is None:
+        print("❌ Banco de dados não conectado!")
+        return
+    
     await atualizar_painel_loja()
-    await atualizar_painel_privado()
+    await atualizar_painel_vendas()
     
     atualizar_paineis.start()
     verificar_pedidos_expirados.start()
@@ -837,7 +850,9 @@ async def on_ready():
     
     asyncio.create_task(start_webhook())
     
-    print(f"✅ Bot pronto! Use !loja para testar")
+    print(f"✅ Bot pronto!")
+    print(f"📌 Use !loja para enviar a loja em qualquer canal")
+    print(f"📌 Use !vendas para ver as estatísticas")
 
 @bot.event
 async def on_interaction(interaction: discord.Interaction):
