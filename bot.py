@@ -924,5 +924,29 @@ async def on_interaction(interaction: discord.Interaction):
             await interaction.response.send_message("❌ Pedido cancelado.", ephemeral=True)
 
 # ================= MAIN =================
+async def start_bot():
+    """Inicia o bot com tratamento de rate limit"""
+    try:
+        await bot.start(DISCORD_TOKEN)
+    except discord.errors.HTTPException as e:
+        if e.status == 429:
+            print("❌ Rate limit do Discord. Aguardando 30 segundos...")
+            await asyncio.sleep(30)
+            await start_bot()  # Tenta novamente
+        else:
+            raise e
+    except Exception as e:
+        print(f"❌ Erro ao iniciar: {e}")
+        raise e
+
 if __name__ == "__main__":
-    bot.run(DISCORD_TOKEN)
+    # Desabilitar reconexão automática muito rápida
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    try:
+        loop.run_until_complete(start_bot())
+    except KeyboardInterrupt:
+        print("🛑 Bot desligado manualmente")
+    finally:
+        loop.close()
