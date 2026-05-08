@@ -397,7 +397,7 @@ async def montar_embed_loja():
             inline=True
         )
     
-    # Guia rápido
+    # Guia rápido quando há produtos
     embed.add_field(
         name="━━━━━━━━━━━━━━━━━━━━",
         value="**📌 COMO COMPRAR?**\n"
@@ -890,6 +890,25 @@ async def on_ready():
         print("❌ Banco de dados não conectado!")
         return
     
+    # Verificar se há produtos, se não houver, criar produtos padrão
+    produtos = await db_listar_produtos()
+    if not produtos:
+        print("📦 Nenhum produto encontrado. Criando produtos padrão...")
+        produtos_padrao = [
+            ("produto1", "VIP Bronze", 19.90, "🥉", "https://exemplo.com/bronze", -1),
+            ("produto2", "VIP Prata", 39.90, "🥈", "https://exemplo.com/prata", -1),
+            ("produto3", "VIP Ouro", 69.90, "🥇", "https://exemplo.com/ouro", -1),
+            ("produto4", "VIP Diamante", 99.90, "💎", "https://exemplo.com/diamante", -1),
+            ("produto5", "VIP Lenda", 199.90, "🏆", "https://exemplo.com/lenda", 5),
+        ]
+        for pid, nome, preco, emoji, link, estoque in produtos_padrao:
+            try:
+                await db_adicionar_produto(pid, nome, preco, emoji, link, estoque)
+                print(f"  ✅ Produto {nome} criado")
+            except Exception as e:
+                print(f"  ❌ Erro ao criar {nome}: {e}")
+        print("✅ Produtos padrão criados!")
+    
     await atualizar_painel_loja()
     await atualizar_painel_vendas()
     
@@ -899,9 +918,8 @@ async def on_ready():
     
     asyncio.create_task(start_webhook())
     
-    print(f"✅ Bot pronto!")
-    print(f"📌 Use !loja para enviar a loja em qualquer canal")
-    print(f"📌 Use !vendas para ver as estatísticas")
+    print(f"✅ Bot pronto! Use !loja para ver os produtos")
+    print(f"📌 Comandos disponíveis: !loja, !vendas, !testar, !lojaadmin")
 
 @bot.event
 async def on_interaction(interaction: discord.Interaction):
@@ -932,7 +950,7 @@ async def start_bot():
         if e.status == 429:
             print("❌ Rate limit do Discord. Aguardando 30 segundos...")
             await asyncio.sleep(30)
-            await start_bot()  # Tenta novamente
+            await start_bot()
         else:
             raise e
     except Exception as e:
@@ -940,7 +958,6 @@ async def start_bot():
         raise e
 
 if __name__ == "__main__":
-    # Desabilitar reconexão automática muito rápida
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
