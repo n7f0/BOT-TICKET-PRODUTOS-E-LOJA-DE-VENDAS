@@ -19,7 +19,7 @@ CANAL_FALHAS  = int(os.getenv("CANAL_FALHAS", "0"))
 WEBHOOK_LOG   = os.getenv("WEBHOOK_LOG", "")
 DISCORD_TOKEN = os.getenv("LOJA_DISCORD_TOKEN")
 MP_TOKEN      = os.getenv("MERCADO_PAGO_TOKEN")
-MP_SECRET     = os.getenv("MP_WEBHOOK_SECRET", "")  # Chave secreta do webhook MP
+MP_SECRET     = os.getenv("MP_WEBHOOK_SECRET", "")
 DATABASE_URL  = os.getenv("DATABASE_URL")
 
 for nome, val in [("LOJA_DISCORD_TOKEN", DISCORD_TOKEN),
@@ -36,7 +36,7 @@ bot     = commands.Bot(command_prefix="!", intents=intents)
 db_pool: asyncpg.Pool = None
 pedidos_pendentes: dict = {}
 
-# Cooldown por usuário: user_id -> datetime do último pedido
+# Cooldown por usuário
 cooldowns: dict = {}
 COOLDOWN_SEGUNDOS = 60
 
@@ -91,7 +91,7 @@ async def init_db():
             VALUES ('vendas','0'),('faturamento','0.0'),('vendas_hoje','0'),('faturamento_hoje','0.0'),('ultima_reset','')
             ON CONFLICT (chave) DO NOTHING;
         """)
-        # Migração de schema
+        
         row = await conn.fetchrow("SELECT versao FROM schema_version LIMIT 1")
         versao_atual = row["versao"] if row else 0
 
@@ -114,8 +114,6 @@ async def init_db():
 
     print(f"✅ Banco de dados inicializado (schema v{SCHEMA_VERSION}).")
 
-
-# ── Produtos ──────────────────────────────────────────────
 async def db_listar_produtos() -> dict:
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT * FROM produtos ORDER BY criado_em")
@@ -152,15 +150,12 @@ async def db_decrementar_estoque(pid):
         """, pid)
 
 async def db_verificar_estoque(pid) -> bool:
-    """Retorna True se há estoque disponível (ou se é ilimitado: -1)."""
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT estoque FROM produtos WHERE id=$1", pid)
     if not row:
         return False
     return row["estoque"] == -1 or row["estoque"] > 0
 
-
-# ── Pedidos ───────────────────────────────────────────────
 async def db_inserir_pedido(pid, user_id, user_tag, produto_id, produto_nome, produto_preco):
     async with db_pool.acquire() as conn:
         await conn.execute("""
@@ -208,7 +203,6 @@ async def db_pedidos_falha_pendentes() -> list:
     return [dict(r) for r in rows]
 
 async def db_pedidos_pendentes_antigos(minutos: int = 35) -> list:
-    """Busca pedidos pendentes mais antigos que X minutos (PIX expirado)."""
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT * FROM pedidos
@@ -217,8 +211,6 @@ async def db_pedidos_pendentes_antigos(minutos: int = 35) -> list:
         """, minutos)
     return [dict(r) for r in rows]
 
-
-# ── Estatísticas ──────────────────────────────────────────
 async def db_get_stat(chave: str) -> float:
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT valor FROM estatisticas WHERE chave=$1", chave)
@@ -253,8 +245,6 @@ async def db_reset_stats_diarias():
             UPDATE estatisticas SET valor=$1    WHERE chave='ultima_reset';
         """, datetime.now(timezone.utc).isoformat())
 
-
-# ── IDs de mensagens do painel ────────────────────────────
 async def db_get_painel_id(nome: str) -> int | None:
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT msg_id FROM painel_ids WHERE nome=$1", nome)
@@ -267,8 +257,6 @@ async def db_set_painel_id(nome: str, msg_id: int):
             ON CONFLICT (nome) DO UPDATE SET msg_id=$2
         """, nome, msg_id)
 
-
-# ================= HELPERS =================
 def formatar_preco(valor):
     valor = float(valor)
     if float(valor) == int(valor):
@@ -282,9 +270,8 @@ def status_emoji(status: str) -> str:
     return {"pendente":"🟡","aprovado":"🟢","falha_entrega":"🔴","expirado":"⚫"}.get(status, "⚪")
 
 def verificar_assinatura_mp(payload: bytes, header_signature: str, secret: str) -> bool:
-    """Valida a assinatura HMAC-SHA256 enviada pelo Mercado Pago."""
     if not secret or not header_signature:
-        return True  # Se não configurou o secret, aceita tudo (modo dev)
+        return True
     try:
         partes = dict(p.split("=", 1) for p in header_signature.split(","))
         ts   = partes.get("ts", "")
@@ -296,7 +283,6 @@ def verificar_assinatura_mp(payload: bytes, header_signature: str, secret: str) 
         return False
 
 def verificar_cooldown(user_id: int) -> int:
-    """Retorna 0 se liberado, ou os segundos restantes."""
     ultimo = cooldowns.get(user_id)
     if not ultimo:
         return 0
@@ -305,7 +291,6 @@ def verificar_cooldown(user_id: int) -> int:
 
 def registrar_cooldown(user_id: int):
     cooldowns[user_id] = datetime.now(timezone.utc)
-
 
 # ================= EMBEDS =================
 async def montar_embed_privado():
@@ -358,20 +343,295 @@ async def montar_embed_loja():
         )
     return embed
 
+# ================= VIEWS =================
+class SelecionarProduto(discord.ui.Select):
+    def __init__(self, produtos: dict):
+        options = []
+        for pid, prod in produtos.items():
+            estoque_ok = prod["estoque"] == -1 or prod["estoque"] > 0
+            if not estoque_ok:
+                continue
+            options.append(
+                discord.SelectOption(
+                    label=f"{prod['nome']} - R$ {formatar_preco(prod['preco'])}",
+                    value=pid,
+                    emoji=prod.get('emoji', '🛒'),
+                    description=f"ID: {pid}"
+                )
+            )
+        super().__init__(placeholder="Selecione um produto...", options=options[:25])
+    
+    async def callback(self, interaction: discord.Interaction):
+        await processar_compra(interaction, self.values[0])
 
-# ================= UTIL =================
+class PainelPrincipal(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(discord.ui.Button(label="💰 Comprar", style=discord.ButtonStyle.success, custom_id="btn_comprar"))
+        self.add_item(discord.ui.Button(label="📜 Meus Pedidos", style=discord.ButtonStyle.secondary, custom_id="btn_pedidos"))
+    
+    @discord.ui.button(label="🎁 Resgatar", style=discord.ButtonStyle.primary, custom_id="btn_resgatar", row=1)
+    async def btn_resgatar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(ResgatarModal())
+    
+    @discord.ui.button(label="👑 Admin", style=discord.ButtonStyle.danger, custom_id="btn_admin", row=1)
+    async def btn_admin(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not eh_dono(interaction):
+            return await interaction.response.send_message("❌ Apenas administradores podem acessar.", ephemeral=True)
+        await interaction.response.send_message(embed=await montar_embed_admin(), view=AdminView(), ephemeral=True)
+
+class ResgatarModal(discord.ui.Modal, title="🎁 Resgatar Produto"):
+    codigo = discord.ui.TextInput(label="Código de Resgate", placeholder="Cole seu código aqui...", style=discord.TextStyle.paragraph)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.send_message("⏳ Verificando código...", ephemeral=True)
+        codigo = self.codigo.value.strip()
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM pedidos WHERE id=$1 AND status='aprovado' AND entregue=false", codigo)
+            if not row:
+                return await interaction.edit_original_response(content="❌ Código inválido ou já resgatado!", embed=None, view=None)
+            produto = await db_listar_produtos()
+            prod = produto.get(row["produto_id"])
+            if prod:
+                embed = Embed(title="🎁 Produto Resgatado!", color=Color.green())
+                embed.add_field(name="📦 Produto", value=row["produto_nome"], inline=False)
+                embed.add_field(name="🔗 Link", value=f"[Clique aqui]({prod['link']})", inline=False)
+                await interaction.user.send(embed=embed)
+                await conn.execute("UPDATE pedidos SET entregue=true WHERE id=$1", codigo)
+                await interaction.edit_original_response(content="✅ Produto resgatado! Verifique sua DM.", embed=None, view=None)
+            else:
+                await interaction.edit_original_response(content="❌ Produto não encontrado!", embed=None, view=None)
+
+class AdminView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=60)
+    
+    @discord.ui.button(label="➕ Adicionar Produto", style=discord.ButtonStyle.success)
+    async def add_produto(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AdicionarProdutoModal())
+    
+    @discord.ui.button(label="✏️ Editar Produto", style=discord.ButtonStyle.primary)
+    async def edit_produto(self, interaction: discord.Interaction, button: discord.ui.Button):
+        produtos = await db_listar_produtos()
+        if not produtos:
+            return await interaction.response.send_message("❌ Nenhum produto cadastrado.", ephemeral=True)
+        view = SelecionarProdutoEditar(produtos)
+        await interaction.response.send_message("Selecione o produto para editar:", view=view, ephemeral=True)
+    
+    @discord.ui.button(label="🗑️ Remover Produto", style=discord.ButtonStyle.danger)
+    async def remove_produto(self, interaction: discord.Interaction, button: discord.ui.Button):
+        produtos = await db_listar_produtos()
+        if not produtos:
+            return await interaction.response.send_message("❌ Nenhum produto cadastrado.", ephemeral=True)
+        view = SelecionarProdutoRemover(produtos)
+        await interaction.response.send_message("Selecione o produto para remover:", view=view, ephemeral=True)
+    
+    @discord.ui.button(label="📊 Estatísticas", style=discord.ButtonStyle.secondary)
+    async def stats(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = await montar_embed_privado()
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+class SelecionarProdutoEditar(discord.ui.View):
+    def __init__(self, produtos: dict):
+        super().__init__(timeout=60)
+        select = discord.ui.Select(placeholder="Selecione um produto...")
+        for pid, prod in produtos.items():
+            select.add_option(label=f"{prod['nome']} - R$ {prod['preco']}", value=pid, emoji=prod.get('emoji', '🛒'))
+        select.callback = self.select_callback
+        self.add_item(select)
+    
+    async def select_callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(EditarProdutoModal(self.select.values[0]))
+
+class SelecionarProdutoRemover(discord.ui.View):
+    def __init__(self, produtos: dict):
+        super().__init__(timeout=60)
+        select = discord.ui.Select(placeholder="Selecione um produto...")
+        for pid, prod in produtos.items():
+            select.add_option(label=f"{prod['nome']} - R$ {prod['preco']}", value=pid, emoji=prod.get('emoji', '🛒'))
+        select.callback = self.select_callback
+        self.add_item(select)
+    
+    async def select_callback(self, interaction: discord.Interaction):
+        await db_remover_produto(self.select.values[0])
+        await interaction.response.send_message("✅ Produto removido com sucesso!", ephemeral=True)
+
+class AdicionarProdutoModal(discord.ui.Modal, title="Adicionar Produto"):
+    pid = discord.ui.TextInput(label="ID do Produto", placeholder="ex: produto1", required=True)
+    nome = discord.ui.TextInput(label="Nome", placeholder="Nome do produto", required=True)
+    preco = discord.ui.TextInput(label="Preço", placeholder="19.90", required=True)
+    emoji = discord.ui.TextInput(label="Emoji", placeholder="🛒", required=False, default="🛒")
+    link = discord.ui.TextInput(label="Link de Entrega", placeholder="https://...", required=True)
+    estoque = discord.ui.TextInput(label="Estoque (-1 = Ilimitado)", placeholder="-1", required=False, default="-1")
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            preco_float = float(self.preco.value.replace(",", "."))
+            estoque_int = int(self.estoque.value)
+            await db_adicionar_produto(self.pid.value, self.nome.value, preco_float, self.emoji.value, self.link.value, estoque_int)
+            await interaction.response.send_message(f"✅ Produto `{self.pid.value}` adicionado!", ephemeral=True)
+            await atualizar_painel_loja()
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Erro: {e}", ephemeral=True)
+
+class EditarProdutoModal(discord.ui.Modal, title="Editar Produto"):
+    def __init__(self, produto_id):
+        super().__init__()
+        self.produto_id = produto_id
+    
+    nome = discord.ui.TextInput(label="Nome", required=True)
+    preco = discord.ui.TextInput(label="Preço", required=True)
+    estoque = discord.ui.TextInput(label="Estoque (-1 = Ilimitado)", required=True)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            preco_float = float(self.preco.value.replace(",", "."))
+            estoque_int = int(self.estoque.value)
+            await db_editar_produto(self.produto_id, self.nome.value, preco_float, estoque_int)
+            await interaction.response.send_message(f"✅ Produto `{self.produto_id}` editado!", ephemeral=True)
+            await atualizar_painel_loja()
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Erro: {e}", ephemeral=True)
+
+async def processar_compra(interaction: discord.Interaction, key: str):
+    restante = verificar_cooldown(interaction.user.id)
+    if restante > 0:
+        return await interaction.response.send_message(f"⏳ Aguarde **{restante}s** antes de gerar outro pagamento.", ephemeral=True)
+
+    produtos = await db_listar_produtos()
+    produto = produtos.get(key)
+    if not produto:
+        return await interaction.response.send_message("❌ Produto não encontrado.", ephemeral=True)
+
+    if not await db_verificar_estoque(key):
+        return await interaction.response.send_message("❌ Produto sem estoque disponível.", ephemeral=True)
+
+    await interaction.response.defer(ephemeral=True)
+    
+    try:
+        payment_data = sdk.payment().create({
+            "transaction_amount": float(produto["preco"]),
+            "description": produto["nome"],
+            "payment_method_id": "pix",
+            "payer": {"email": f"user_{interaction.user.id}@email.com"}
+        })
+        
+        response = payment_data["response"]
+        
+        if "point_of_interaction" not in response:
+            return await interaction.followup.send("❌ Erro ao gerar PIX. Tente novamente.", ephemeral=True)
+        
+        pix_qr_code = response["point_of_interaction"]["transaction_data"]["qr_code"]
+        pix_copy_paste = response["point_of_interaction"]["transaction_data"]["qr_code_base64"]
+        payment_id = response["id"]
+        pedido_id = str(uuid.uuid4())
+        
+        await db_inserir_pedido(pedido_id, interaction.user.id, str(interaction.user), key, produto["nome"], produto["preco"])
+        pedidos_pendentes[payment_id] = pedido_id
+        
+        embed = Embed(title="💳 Pagamento PIX", description=f"**Produto:** {produto['nome']}\n**Valor:** R$ {formatar_preco(produto['preco'])}", color=Color.green())
+        embed.add_field(name="📱 Código PIX (Copiar e Colar)", value=f"```\n{pix_copy_paste}\n```", inline=False)
+        embed.set_image(url=pix_qr_code)
+        embed.set_footer(text=f"ID: {pedido_id} | Expira em 30 minutos")
+        
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(label="✅ Já paguei", style=discord.ButtonStyle.success, custom_id=f"check_{payment_id}"))
+        view.add_item(discord.ui.Button(label="❌ Cancelar", style=discord.ButtonStyle.danger, custom_id=f"cancel_{payment_id}"))
+        
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        await enviar_log("pedido", interaction.user, produto, produto["preco"], f"ID: {pedido_id}")
+        registrar_cooldown(interaction.user.id)
+        
+        asyncio.create_task(verificar_pagamento(payment_id, pedido_id, interaction.user, produto, key))
+        
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erro ao processar pagamento: {e}", ephemeral=True)
+
+async def verificar_pagamento(payment_id, pedido_id, user, produto, produto_key):
+    for _ in range(60):
+        await asyncio.sleep(30)
+        try:
+            payment_info = sdk.payment().get(payment_id)
+            status = payment_info["response"].get("status")
+            
+            if status == "approved":
+                if await tentar_entregar(user, produto, produto_key, pedido_id):
+                    await db_marcar_entregue(pedido_id)
+                    await db_decrementar_estoque(produto_key)
+                    await db_incrementar_venda(float(produto["preco"]))
+                    await enviar_log("venda", user, produto, produto["preco"])
+                    await atualizar_painel_privado()
+                    await atualizar_painel_loja()
+                else:
+                    await db_marcar_falha_entrega(pedido_id)
+                return
+            elif status in ["cancelled", "refunded"]:
+                await db_marcar_expirado(pedido_id)
+                return
+        except:
+            pass
+    
+    await db_marcar_expirado(pedido_id)
+
+async def tentar_entregar(user, produto, produto_id, pid) -> bool:
+    embed = Embed(
+        title="🧾 RECIBO DE COMPRA",
+        description="Seu pagamento foi aprovado com sucesso!",
+        color=Color.green(),
+        timestamp=datetime.now(timezone.utc)
+    )
+    embed.add_field(name="📦 Produto", value=f"**{produto['nome']}**", inline=False)
+    embed.add_field(name="💰 Valor", value=f"R$ {formatar_preco(produto['preco'])}", inline=True)
+    embed.add_field(name="🆔 ID", value=f"`{produto_id}`", inline=True)
+    embed.add_field(name="🔗 Entrega", value=f"[Clique aqui]({produto['link']})", inline=False)
+    embed.set_footer(text="Nexzy Store • Obrigado pela compra ❤️")
+    
+    try:
+        await user.send(embed=embed)
+        return True
+    except:
+        return False
+
+async def enviar_log(tipo, usuario=None, produto=None, valor=None, extra=None):
+    if not WEBHOOK_LOG:
+        return
+    titulo = {"pedido":"🟡 NOVO PEDIDO","venda":"🟢 VENDA APROVADA","erro":"🔴 ERRO"}[tipo]
+    cor = {"pedido":Color.gold(), "venda":Color.green(), "erro":Color.red()}[tipo]
+    embed = Embed(title=titulo, color=cor, timestamp=datetime.now(timezone.utc))
+    if usuario:
+        embed.add_field(name="👤 Usuário", value=f"{usuario} ({usuario.id})", inline=False)
+    if produto:
+        embed.add_field(name="📦 Produto", value=produto["nome"], inline=True)
+    if valor is not None:
+        embed.add_field(name="💰 Valor", value=f"R$ {formatar_preco(valor)}", inline=True)
+    if extra:
+        embed.add_field(name="ℹ️ Info", value=str(extra), inline=False)
+    try:
+        async with aiohttp.ClientSession() as session:
+            wh = discord.Webhook.from_url(WEBHOOK_LOG, session=session)
+            await wh.send(embed=embed)
+    except:
+        pass
+
+async def montar_embed_admin():
+    produtos = await db_listar_produtos()
+    embed = Embed(title="👑 Painel Admin", color=Color.purple())
+    for pid, prod in produtos.items():
+        embed.add_field(name=f"{prod.get('emoji','🛒')} {prod['nome']}", value=f"ID: `{pid}`\nPreço: R$ {formatar_preco(prod['preco'])}\nEstoque: {prod['estoque'] if prod['estoque'] != -1 else '∞'}\nVendas: {prod['vendas']}", inline=True)
+    return embed
+
 async def atualizar_painel_privado():
     canal = bot.get_channel(CANAL_STATS)
     if not canal:
         return
-    embed  = await montar_embed_privado()
+    embed = await montar_embed_privado()
     msg_id = await db_get_painel_id("privado")
     try:
         if msg_id:
             msg = await canal.fetch_message(msg_id)
             await msg.edit(embed=embed)
             return
-    except Exception:
+    except:
         pass
     msg = await canal.send(embed=embed)
     await db_set_painel_id("privado", msg.id)
@@ -380,588 +640,126 @@ async def atualizar_painel_loja():
     canal = bot.get_channel(CANAL_STATS)
     if not canal:
         return
-    embed  = await montar_embed_loja()
+    embed = await montar_embed_loja()
     msg_id = await db_get_painel_id("loja")
     try:
         if msg_id:
             msg = await canal.fetch_message(msg_id)
             await msg.edit(embed=embed, view=PainelPrincipal())
             return
-    except Exception:
+    except:
         pass
     msg = await canal.send(embed=embed, view=PainelPrincipal())
     await db_set_painel_id("loja", msg.id)
 
-async def notificar_falha(user, titulo, descricao):
-    canal = bot.get_channel(CANAL_FALHAS)
-    if not canal:
-        return
-    embed = Embed(title=titulo, description=descricao, color=Color.red(),
-                  timestamp=datetime.now(timezone.utc))
-    embed.add_field(name="Usuário", value=f"{user} ({user.id})", inline=False)
-    try:
-        await canal.send(embed=embed)
-    except Exception:
-        pass
-
-async def tentar_entregar(user, produto, produto_id, pid) -> bool:
-    """Envia DM de entrega. Retorna True se entregue com sucesso."""
-    embed = Embed(
-        title="🧾 RECIBO DE COMPRA",
-        description="Seu pagamento foi aprovado com sucesso!",
-        color=Color.green(),
-        timestamp=datetime.now(timezone.utc)
-    )
-    embed.add_field(name="📦 Produto", value=f"**{produto['nome']}**",                inline=False)
-    embed.add_field(name="💰 Valor",   value=f"R$ {formatar_preco(produto['preco'])}", inline=True)
-    embed.add_field(name="🆔 ID",      value=f"`{produto_id}`",                        inline=True)
-    embed.add_field(name="🔗 Entrega", value=f"[Clique aqui]({produto['link']})",      inline=False)
-    embed.set_footer(text="Nexzy Store • Obrigado pela compra ❤️")
-    try:
-        await user.send(embed=embed)
-        return True
-    except discord.Forbidden:
-        await enviar_log("erro", user, produto, produto["preco"], extra="DM fechada/bloqueada")
-        await notificar_falha(user, "❌ Falha na entrega", "Usuário com DM fechada ou bloqueada.")
-        return False
-    except Exception as e:
-        await enviar_log("erro", user, produto, produto["preco"], extra=str(e))
-        await notificar_falha(user, "❌ Falha na entrega", f"Erro: {e}")
-        return False
-
-
-# ================= LOG =================
-class LogView(discord.ui.View):
-    def __init__(self, user_id: int):
-        super().__init__(timeout=300)
-        self.add_item(discord.ui.Button(label="👤 Ver Perfil",
-                                        url=f"https://discord.com/users/{user_id}"))
-
-async def enviar_log(tipo, usuario=None, produto=None, valor=None, extra=None):
-    if not WEBHOOK_LOG:
-        return
-    titulo = {"pedido":"🟡 NOVO PEDIDO","venda":"🟢 VENDA APROVADA","erro":"🔴 ERRO"}[tipo]
-    cor    = {"pedido":Color.gold(),    "venda":Color.green(),       "erro":Color.red()}[tipo]
-    embed  = Embed(title=titulo, color=cor, timestamp=datetime.now(timezone.utc))
-    embed.set_footer(text="Nexzy Store • Sistema Automático")
-    if usuario:
-        embed.add_field(name="👤 Usuário", value=f"{usuario} ({usuario.id})", inline=False)
-    if produto:
-        embed.add_field(name="📦 Produto", value=produto["nome"],                  inline=True)
-    if valor is not None:
-        embed.add_field(name="💰 Valor",   value=f"R$ {formatar_preco(valor)}",    inline=True)
-    if extra:
-        embed.add_field(name="ℹ️ Info",    value=str(extra),                       inline=False)
-    try:
-        async with aiohttp.ClientSession() as session:
-            wh = discord.Webhook.from_url(WEBHOOK_LOG, session=session)
-            await wh.send(embed=embed, view=LogView(usuario.id) if usuario else None)
-    except Exception as e:
-        print(f"[ERRO LOG] {e}")
-
-
-# ================= PAGAMENTO =================
-def criar_pagamento(user_id, produto):
-    return sdk.payment().create({
-        "transaction_amount": float(produto["preco"]),
-        "description":        produto["nome"],
-        "payment_method_id":  "pix",
-        "payer":              {"email": f"user_{user_id}@email.com"}
-    })["response"]
-
-async def processar_compra(interaction: discord.Interaction, key: str):
-    # Cooldown
-    restante = verificar_cooldown(interaction.user.id)
-    if restante > 0:
-        return await interaction.response.send_message(
-            f"⏳ Aguarde **{restante}s** antes de gerar outro pagamento.", ephemeral=True)
-
-    produtos = await db_listar_produtos()
-    produto  = produtos.get(key)
-    if not produto:
-        return await interaction.response.send_message("❌ Produto não encontrado.", ephemeral=True)
-
-    # Estoque
-    if not await db_verificar_estoque(key):
-        return await interaction.response.send_message("❌ Produto sem estoque disponível.", ephemeral=True)
-
-    await interaction.response.defer(ephemeral=True)
-
-    try:
-        loop      = asyncio.get_running_loop()
-        pagamento = await loop.run_in_executor(None, criar_pagamento, interaction.user.id, produto)
-    except Exception as e:
-        return await interaction.followup.send(f"❌ Erro ao gerar pagamento: `{e}`", ephemeral=True)
-
-    try:
-        pix = pagamento["point_of_interaction"]["transaction_data"]["qr_code"]
-    except Exception:
-        return await interaction.followup.send("❌ Erro ao extrair código PIX.", ephemeral=True)
-
-    pid  = str(pagamento["id"])
-    user = interaction.user
-
-    await db_inserir_pedido(pid, user.id, str(user), key, produto["nome"], float(produto["preco"]))
-    pedidos_pendentes[pid] = {"user_id": user.id, "produto": produto, "produto_id": key}
-    registrar_cooldown(user.id)
-
-    await enviar_log("pedido", user, produto, produto["preco"])
-
-    embed = Embed(title="💳 Pagamento PIX", color=Color.green())
-    embed.add_field(name="Produto", value=produto["nome"],                          inline=True)
-    embed.add_field(name="Valor",   value=f"R$ {formatar_preco(produto['preco'])}", inline=True)
-    embed.add_field(name="🔑 Copia e Cola", value=f"```{pix}```",                  inline=False)
-    embed.set_footer(text="⏱️ PIX válido por 30 minutos. Você receberá o produto via DM.")
-    await interaction.followup.send(embed=embed, ephemeral=True)
-
-
-# ================= MODAIS =================
-class AddModal(discord.ui.Modal):
-    def __init__(self):
-        super().__init__(title="Adicionar Produto")
-        self.nome    = discord.ui.TextInput(label="Nome")
-        self.preco   = discord.ui.TextInput(label="Preço (ex: 10.00)")
-        self.emoji   = discord.ui.TextInput(label="Emoji", required=False)
-        self.link    = discord.ui.TextInput(label="Link de entrega")
-        self.estoque = discord.ui.TextInput(label="Estoque (-1 = ilimitado)", default="-1")
-        for item in [self.nome, self.preco, self.emoji, self.link, self.estoque]:
-            self.add_item(item)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            preco_val   = float(self.preco.value.replace(",", "."))
-            estoque_val = int(self.estoque.value)
-        except ValueError:
-            return await interaction.response.send_message("❌ Preço ou estoque inválido.", ephemeral=True)
-        pid = f"produto_{uuid.uuid4().hex[:6]}"
-        await db_adicionar_produto(pid, self.nome.value, preco_val,
-                                   self.emoji.value or "🛒", self.link.value, estoque_val)
-        await atualizar_painel_loja()
-        await interaction.response.send_message(
-            f"✅ **{self.nome.value}** adicionado!\nID: `{pid}`", ephemeral=True)
-
-class EditModal(discord.ui.Modal):
-    def __init__(self, key: str, produto: dict):
-        super().__init__(title="Editar Produto")
-        self.key     = key
-        self.nome    = discord.ui.TextInput(label="Novo nome",    default=produto["nome"],                  required=True)
-        self.preco   = discord.ui.TextInput(label="Novo valor",   default=formatar_preco(produto["preco"]), required=True)
-        self.estoque = discord.ui.TextInput(label="Estoque (-1=ilimitado)", default=str(produto["estoque"]),required=True)
-        for item in [self.nome, self.preco, self.estoque]:
-            self.add_item(item)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            preco_val   = float(self.preco.value.replace(",", "."))
-            estoque_val = int(self.estoque.value)
-        except ValueError:
-            return await interaction.response.send_message("❌ Valor ou estoque inválido.", ephemeral=True)
-        await db_editar_produto(self.key, self.nome.value, preco_val, estoque_val)
-        await atualizar_painel_loja()
-        await interaction.response.send_message(f"✅ Produto `{self.key}` atualizado!", ephemeral=True)
-
-class ReentregaModal(discord.ui.Modal):
-    def __init__(self):
-        super().__init__(title="Reentrega Manual")
-        self.pid = discord.ui.TextInput(label="ID do Pagamento (Mercado Pago)")
-        self.add_item(self.pid)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        pid    = self.pid.value.strip()
-        pedido = await db_buscar_pedido(pid)
-
-        if not pedido:
-            return await interaction.followup.send("❌ Pedido não encontrado.", ephemeral=True)
-        if pedido["entregue"]:
-            return await interaction.followup.send("⚠️ Este pedido já foi entregue.", ephemeral=True)
-
-        produtos = await db_listar_produtos()
-        produto  = produtos.get(pedido["produto_id"], {
-            "nome": pedido["produto_nome"], "preco": pedido["produto_preco"], "link": "#"
-        })
-
-        try:
-            user = await bot.fetch_user(pedido["user_id"])
-        except Exception:
-            return await interaction.followup.send("❌ Não foi possível encontrar o usuário.", ephemeral=True)
-
-        entregue = await tentar_entregar(user, produto, pedido["produto_id"], pid)
-        if entregue:
-            await db_marcar_entregue(pid)
-            await enviar_log("venda", user, produto, produto["preco"], extra="Reentrega manual")
-            await interaction.followup.send(f"✅ Entrega realizada com sucesso para **{user}**!", ephemeral=True)
-        else:
-            await interaction.followup.send("❌ Falha ao enviar DM. DM do usuário pode estar fechada.", ephemeral=True)
-
-
-# ================= SELECTS =================
-class SelectProdutos(discord.ui.Select):
-    def __init__(self, produtos: dict):
-        opts = [
-            discord.SelectOption(
-                label=p["nome"][:100],
-                description=f"R$ {formatar_preco(p['preco'])} | {'Esgotado' if p['estoque']==0 else ('∞' if p['estoque']==-1 else str(p['estoque'])+' un.')}",
-                emoji=p.get("emoji", "🛒"),
-                value=k
-            ) for k, p in list(produtos.items())[:25]
-        ]
-        super().__init__(placeholder="Selecione um produto...", min_values=1, max_values=1, options=opts)
-
-    async def callback(self, interaction: discord.Interaction):
-        await processar_compra(interaction, self.values[0])
-
-class SelectEditarProdutos(discord.ui.Select):
-    def __init__(self, produtos: dict):
-        self._produtos = produtos
-        opts = [
-            discord.SelectOption(label=p["nome"][:100],
-                                 description=f"Editar · R$ {formatar_preco(p['preco'])}",
-                                 emoji=p.get("emoji","🛒"), value=k)
-            for k, p in list(produtos.items())[:25]
-        ]
-        super().__init__(placeholder="Escolha o produto para editar...", min_values=1, max_values=1, options=opts)
-
-    async def callback(self, interaction: discord.Interaction):
-        produto = self._produtos.get(self.values[0])
-        await interaction.response.send_modal(EditModal(self.values[0], produto))
-
-class SelectRemoverProdutos(discord.ui.Select):
-    def __init__(self, produtos: dict):
-        opts = [
-            discord.SelectOption(label=p["nome"][:100],
-                                 description=f"Remover · R$ {formatar_preco(p['preco'])}",
-                                 emoji=p.get("emoji","🛒"), value=k)
-            for k, p in list(produtos.items())[:25]
-        ]
-        super().__init__(placeholder="Escolha o produto para remover...", min_values=1, max_values=1, options=opts)
-
-    async def callback(self, interaction: discord.Interaction):
-        await db_remover_produto(self.values[0])
-        await atualizar_painel_loja()
-        await interaction.response.send_message("✅ Produto removido.", ephemeral=True)
-
-
-# ================= VIEWS =================
-class BotaoVoltarPrincipal(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="🔙 Voltar", style=discord.ButtonStyle.secondary)
-
-    async def callback(self, interaction: discord.Interaction):
-        embed = await montar_embed_loja()
-        await interaction.response.send_message(embed=embed, view=PainelPrincipal(), ephemeral=True)
-
-class BotaoVoltarAdmin(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="🔙 Voltar", style=discord.ButtonStyle.secondary)
-
-    async def callback(self, interaction: discord.Interaction):
-        await interaction.response.send_message("Menu administrativo:", view=ViewAdmin(), ephemeral=True)
-
-class ViewProdutos(discord.ui.View):
-    def __init__(self, produtos: dict):
-        super().__init__(timeout=300)
-        self.add_item(SelectProdutos(produtos))
-        self.add_item(BotaoVoltarPrincipal())
-
-class ViewEditarProdutos(discord.ui.View):
-    def __init__(self, produtos: dict):
-        super().__init__(timeout=300)
-        self.add_item(SelectEditarProdutos(produtos))
-        self.add_item(BotaoVoltarAdmin())
-
-class ViewRemoverProdutos(discord.ui.View):
-    def __init__(self, produtos: dict):
-        super().__init__(timeout=300)
-        self.add_item(SelectRemoverProdutos(produtos))
-        self.add_item(BotaoVoltarAdmin())
-
-class BotaoAbrirProdutos(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="📦 Produtos", style=discord.ButtonStyle.success, custom_id="btn_produtos")
-
-    async def callback(self, interaction: discord.Interaction):
-        produtos = await db_listar_produtos()
-        if not produtos:
-            return await interaction.response.send_message("❌ Nenhum produto cadastrado.", ephemeral=True)
-        await interaction.response.send_message("Escolha um produto:", view=ViewProdutos(produtos), ephemeral=True)
-
-class BotaoAdmin(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="⚙️ Admin", style=discord.ButtonStyle.secondary, custom_id="btn_admin")
-
-    async def callback(self, interaction: discord.Interaction):
-        if not eh_dono(interaction):
-            return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
-        await interaction.response.send_message("Menu administrativo:", view=ViewAdmin(), ephemeral=True)
-
-class BotaoAdd(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="➕ Adicionar", style=discord.ButtonStyle.primary, custom_id="admin_add")
-
-    async def callback(self, interaction: discord.Interaction):
-        if not eh_dono(interaction): return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
-        await interaction.response.send_modal(AddModal())
-
-class BotaoEditar(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="✏️ Editar", style=discord.ButtonStyle.secondary, custom_id="admin_edit")
-
-    async def callback(self, interaction: discord.Interaction):
-        if not eh_dono(interaction): return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
-        produtos = await db_listar_produtos()
-        await interaction.response.send_message("Selecione o produto para editar:", view=ViewEditarProdutos(produtos), ephemeral=True)
-
-class BotaoRemover(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="🗑️ Remover", style=discord.ButtonStyle.danger, custom_id="admin_remove")
-
-    async def callback(self, interaction: discord.Interaction):
-        if not eh_dono(interaction): return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
-        produtos = await db_listar_produtos()
-        await interaction.response.send_message("Selecione o produto para remover:", view=ViewRemoverProdutos(produtos), ephemeral=True)
-
-class BotaoReentregar(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="🔁 Reentrega", style=discord.ButtonStyle.primary, custom_id="admin_reentrega")
-
-    async def callback(self, interaction: discord.Interaction):
-        if not eh_dono(interaction): return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
-        await interaction.response.send_modal(ReentregaModal())
-
-class ViewAdmin(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=300)
-        self.add_item(BotaoAdd())
-        self.add_item(BotaoEditar())
-        self.add_item(BotaoRemover())
-        self.add_item(BotaoReentregar())
-        self.add_item(BotaoVoltarPrincipal())
-
-class PainelPrincipal(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-        self.add_item(BotaoAbrirProdutos())
-        self.add_item(BotaoAdmin())
-
-
-# ================= WEBHOOK MERCADO PAGO =================
-async def mp_webhook(request):
-    raw = await request.read()
-
-    # Validação de assinatura
-    sig = request.headers.get("x-signature", "")
-    if MP_SECRET and not verificar_assinatura_mp(raw, sig, MP_SECRET):
-        print("[WEBHOOK] Assinatura inválida — requisição rejeitada.")
-        return web.Response(status=401)
-
-    try:
-        data = await request.json()
-    except Exception:
-        return web.Response(status=400)
-
-    if data.get("type") == "payment":
-        pid = str(data["data"]["id"])
-
-        pedido_db = await db_buscar_pedido(pid)
-        if pedido_db and pedido_db["entregue"]:
-            return web.Response(status=200)
-
-        try:
-            info   = sdk.payment().get(pid)
-            status = info["response"].get("status")
-        except Exception as e:
-            print(f"[ERRO verificar pagamento] {e}")
-            return web.Response(status=200)
-
-        if status == "approved":
-            await _processar_aprovacao(pid, pedido_db)
-
-    return web.Response(status=200)
-
-async def _processar_aprovacao(pid: str, pedido_db: dict | None):
-    pedido = pedidos_pendentes.pop(pid, None)
-
-    if not pedido and pedido_db:
-        produtos = await db_listar_produtos()
-        pedido = {
-            "user_id":    pedido_db["user_id"],
-            "produto_id": pedido_db["produto_id"],
-            "produto":    produtos.get(pedido_db["produto_id"], {
-                "nome": pedido_db["produto_nome"],
-                "preco": pedido_db["produto_preco"],
-                "link": "#"
-            })
-        }
-
-    if not pedido:
-        return
-
-    try:
-        user    = await bot.fetch_user(pedido["user_id"])
-        produto = pedido["produto"]
-
-        entregue = await tentar_entregar(user, produto, pedido["produto_id"], pid)
-
-        await db_incrementar_venda(float(produto["preco"]))
-        await db_decrementar_estoque(pedido["produto_id"])
-
-        if entregue:
-            await db_marcar_entregue(pid)
-            await enviar_log("venda", user, produto, produto["preco"])
-        else:
-            await db_marcar_falha_entrega(pid)
-
-        await atualizar_painel_privado()
-    except Exception as e:
-        print(f"[ERRO entrega] {e}")
-
-async def start_web():
-    app = web.Application()
-    app.router.add_post("/mp", mp_webhook)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    porta = int(os.getenv("PORT", "8080"))
-    await web.TCPSite(runner, "0.0.0.0", porta).start()
-    print(f"✅ Webhook MP rodando na porta {porta}")
-
-
 # ================= TASKS =================
 @tasks.loop(minutes=2)
-async def atualizar_sistema():
+async def atualizar_paineis():
     await atualizar_painel_privado()
+    await atualizar_painel_loja()
 
-@tasks.loop(minutes=10)
-async def verificar_pagamentos_pendentes():
-    """Verifica no MP pagamentos que o webhook pode ter perdido."""
-    for pid, pedido in list(pedidos_pendentes.items()):
-        try:
-            info   = sdk.payment().get(pid)
-            status = info["response"].get("status")
-            if status == "approved":
-                pedido_db = await db_buscar_pedido(pid)
-                if not (pedido_db and pedido_db["entregue"]):
-                    await _processar_aprovacao(pid, pedido_db)
-                    print(f"[BACKUP] Pagamento {pid} processado via verificação ativa.")
-        except Exception as e:
-            print(f"[BACKUP ERRO] {pid}: {e}")
+@tasks.loop(minutes=60)
+async def verificar_pedidos_expirados():
+    pedidos = await db_pedidos_pendentes_antigos(35)
+    for pedido in pedidos:
+        await db_marcar_expirado(pedido["id"])
 
-@tasks.loop(minutes=15)
-async def expirar_pedidos_antigos():
-    """Marca como expirado pedidos PIX que passaram de 35 minutos sem pagamento."""
-    expirados = await db_pedidos_pendentes_antigos(35)
-    for p in expirados:
-        await db_marcar_expirado(p["id"])
-        pedidos_pendentes.pop(p["id"], None)
-    if expirados:
-        print(f"[EXPIRAÇÃO] {len(expirados)} pedido(s) marcados como expirados.")
+@tasks.loop(hours=24)
+async def reset_stats_diario():
+    await db_reset_stats_diarias()
 
-@tasks.loop(hours=1)
-async def reset_stats_diarias():
-    """Zera as estatísticas de hoje à meia-noite."""
-    ultima = await db_get_stat_str("ultima_reset")
-    agora  = datetime.now(timezone.utc)
-    hoje   = agora.strftime("%Y-%m-%d")
-
-    if ultima and ultima[:10] == hoje:
-        return
-    if agora.hour == 0:
-        await db_reset_stats_diarias()
-        print("[RESET] Estatísticas diárias zeradas.")
-
-
-# ================= COMANDOS =================
-@bot.command()
-async def loja(ctx):
-    embed = await montar_embed_loja()
-    await ctx.send(embed=embed, view=PainelPrincipal())
-
-@bot.command(name="minhas_compras")
-async def minhas_compras(ctx):
-    """Usuário vê suas últimas 10 compras."""
-    pedidos = await db_pedidos_usuario(ctx.author.id)
-    if not pedidos:
-        return await ctx.author.send("📭 Você ainda não realizou nenhuma compra.")
-
-    embed = Embed(title="🧾 Suas Últimas Compras", color=Color.blurple(),
-                  timestamp=datetime.now(timezone.utc))
-    for p in pedidos:
-        embed.add_field(
-            name=f"{status_emoji(p['status'])} {p['produto_nome']}",
-            value=f"💰 R$ {formatar_preco(p['produto_preco'])} · {p['criado_em'].strftime('%d/%m/%Y %H:%M')}",
-            inline=False
-        )
+# ================= WEBHOOK =================
+async def webhook_handler(request):
     try:
-        await ctx.author.send(embed=embed)
-        if ctx.guild:
-            await ctx.message.add_reaction("📬")
-    except discord.Forbidden:
-        await ctx.send("❌ Não consegui te enviar DM. Abra suas DMs e tente novamente.", delete_after=10)
+        payload = await request.read()
+        signature = request.headers.get("x-signature", "")
+        
+        if MP_SECRET and not verificar_assinatura_mp(payload, signature, MP_SECRET):
+            return web.Response(status=401, text="Assinatura inválida")
+        
+        data = await request.json()
+        
+        if data.get("type") == "payment":
+            payment_id = data.get("data", {}).get("id")
+            if payment_id and payment_id in pedidos_pendentes:
+                payment_info = sdk.payment().get(payment_id)
+                if payment_info["response"].get("status") == "approved":
+                    pedido_id = pedidos_pendentes[payment_id]
+                    pedido = await db_buscar_pedido(pedido_id)
+                    if pedido and not pedido["entregue"]:
+                        user = await bot.fetch_user(pedido["user_id"])
+                        produtos = await db_listar_produtos()
+                        produto = produtos.get(pedido["produto_id"])
+                        if produto and await tentar_entregar(user, produto, pedido["produto_id"], pedido_id):
+                            await db_marcar_entregue(pedido_id)
+                            await db_decrementar_estoque(pedido["produto_id"])
+                            await db_incrementar_venda(pedido["produto_preco"])
+                            await atualizar_painel_privado()
+                            await atualizar_painel_loja()
+                        else:
+                            await db_marcar_falha_entrega(pedido_id)
+        
+        return web.Response(status=200, text="OK")
+    except:
+        return web.Response(status=500, text="Erro")
 
-@bot.command(name="pedido")
-@commands.check(lambda ctx: any(r.id == CARGO_DONO for r in ctx.author.roles))
-async def ver_pedido(ctx, pid: str):
-    """Admin: busca um pedido pelo ID."""
-    pedido = await db_buscar_pedido(pid)
-    if not pedido:
-        return await ctx.send("❌ Pedido não encontrado.", delete_after=10)
+async def start_webhook():
+    app = web.Application()
+    app.router.add_post("/webhook", webhook_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", "8080")))
+    await site.start()
+    print(f"✅ Webhook rodando na porta {os.getenv('PORT', '8080')}")
 
-    embed = Embed(title=f"🔍 Pedido `{pid}`", color=Color.blurple(),
-                  timestamp=datetime.now(timezone.utc))
-    embed.add_field(name="👤 Usuário",  value=f"{pedido['user_tag']} ({pedido['user_id']})", inline=False)
-    embed.add_field(name="📦 Produto",  value=pedido["produto_nome"],                         inline=True)
-    embed.add_field(name="💰 Valor",    value=f"R$ {formatar_preco(pedido['produto_preco'])}", inline=True)
-    embed.add_field(name="📊 Status",   value=f"{status_emoji(pedido['status'])} {pedido['status']}", inline=True)
-    embed.add_field(name="🔁 Tentativas", value=str(pedido["tentativas"]),                    inline=True)
-    embed.add_field(name="📅 Criado em", value=pedido["criado_em"].strftime("%d/%m/%Y %H:%M"),inline=True)
-    await ctx.send(embed=embed)
-
-@bot.command(name="falhas")
-@commands.check(lambda ctx: any(r.id == CARGO_DONO for r in ctx.author.roles))
-async def listar_falhas(ctx):
-    """Admin: lista pedidos com falha de entrega."""
-    falhas = await db_pedidos_falha_pendentes()
-    if not falhas:
-        return await ctx.send("✅ Nenhuma falha de entrega pendente.")
-
-    embed = Embed(title=f"🔴 Falhas de Entrega ({len(falhas)})", color=Color.red(),
-                  timestamp=datetime.now(timezone.utc))
-    for p in falhas[:10]:
-        embed.add_field(
-            name=f"{p['produto_nome']}",
-            value=f"👤 {p['user_tag']} · 🆔 `{p['id']}` · {p['criado_em'].strftime('%d/%m %H:%M')}",
-            inline=False
-        )
-    embed.set_footer(text="Use !pedido <id> para detalhes ou o botão Reentrega no menu Admin.")
-    await ctx.send(embed=embed)
-
-
-# ================= EVENTS =================
-@bot.event
-async def on_message(message):
-    if message.author.bot:
-        return
-    await bot.process_commands(message)
-
+# ================= EVENTOS =================
 @bot.event
 async def on_ready():
-    try:
-        bot.add_view(PainelPrincipal())
-        for t in [atualizar_sistema, verificar_pagamentos_pendentes,
-                  expirar_pedidos_antigos, reset_stats_diarias]:
-            if not t.is_running():
-                t.start()
-        await atualizar_painel_privado()
-        print(f"✅ Bot da Loja online: {bot.user}")
-    except Exception as e:
-        print(f"[ERRO on_ready] {e}")
+    print(f"✅ Bot logado como {bot.user}")
+    await init_db()
+    await atualizar_painel_loja()
+    await atualizar_painel_privado()
+    atualizar_paineis.start()
+    verificar_pedidos_expirados.start()
+    reset_stats_diario.start()
+    asyncio.create_task(start_webhook())
 
+@bot.event
+async def on_interaction(interaction: discord.Interaction):
+    if interaction.type == discord.InteractionType.component:
+        custom_id = interaction.data.get("custom_id", "")
+        
+        if custom_id.startswith("check_"):
+            payment_id = int(custom_id.split("_")[1])
+            await interaction.response.send_message("⏳ Verificando pagamento...", ephemeral=True)
+            payment_info = sdk.payment().get(payment_id)
+            if payment_info["response"].get("status") == "approved":
+                await interaction.edit_original_response(content="✅ Pagamento já foi aprovado! Verifique sua DM.", embed=None, view=None)
+            else:
+                await interaction.edit_original_response(content="⏳ Pagamento ainda não identificado. Aguarde alguns minutos.", embed=None, view=None)
+        
+        elif custom_id.startswith("cancel_"):
+            await interaction.response.send_message("❌ Pedido cancelado.", ephemeral=True)
+            await interaction.edit_original_response(content="❌ Compra cancelada.", embed=None, view=None)
+        
+        elif custom_id == "btn_comprar":
+            produtos = await db_listar_produtos()
+            disponiveis = {k: v for k, v in produtos.items() if v["estoque"] != 0}
+            if not disponiveis:
+                return await interaction.response.send_message("❌ Nenhum produto disponível no momento.", ephemeral=True)
+            view = discord.ui.View()
+            view.add_item(SelecionarProduto(disponiveis))
+            await interaction.response.send_message("Selecione o produto desejado:", view=view, ephemeral=True)
+        
+        elif custom_id == "btn_pedidos":
+            pedidos = await db_pedidos_usuario(interaction.user.id)
+            if not pedidos:
+                return await interaction.response.send_message("📭 Você não tem nenhum pedido.", ephemeral=True)
+            embed = Embed(title="📜 Seus Pedidos", color=Color.blue())
+            for p in pedidos[:10]:
+                embed.add_field(name=f"{status_emoji(p['status'])} {p['produto_nome']}", value=f"ID: `{p['id']}`\nValor: R$ {formatar_preco(p['produto_preco'])}\nData: {p['criado_em'].strftime('%d/%m/%Y %H:%M')}", inline=False)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ================= MAIN =================
-async def main():
-    await init_db()
-    await start_web()
-    await bot.start(DISCORD_TOKEN)
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    bot.run(DISCORD_TOKEN)
