@@ -22,10 +22,18 @@ from aiohttp import web
 CARGO_DONO      = int(os.getenv("CARGO_DONO", "0"))
 CANAL_LOJA      = int(os.getenv("CANAL_LOJA", "0"))
 CANAL_VENDAS    = int(os.getenv("CANAL_VENDAS", "0"))
+CANAL_LOG_VENDAS = int(os.getenv("CANAL_LOG_VENDAS", "1492726744514428980"))
+CANAL_LOG_ADMIN  = int(os.getenv("CANAL_LOG_ADMIN", "1502680283470758041"))
 DISCORD_TOKEN   = os.getenv("LOJA_DISCORD_TOKEN")
 MP_TOKEN        = os.getenv("MERCADO_PAGO_TOKEN")
 DATABASE_URL    = os.getenv("DATABASE_URL")
-WEBHOOK_LOG_URL = "https://discord.com/api/webhooks/1494018278593663218/thPR-PptRQNKQKvY0Jw9aFVFf7lkxhPp00Bb7Dn2_Ee7nfwFIP2ZOmr7NO6ApAH-H7ts"
+
+# CORES TEMA PRETO
+COR_PRINCIPAL   = 0x1a1a1a  # Preto/cinza escuro
+COR_SUCESSO     = 0x2d2d2d  # Cinza escuro
+COR_ERRO        = 0x8b0000  # Vermelho escuro
+COR_PENDENTE    = 0x3d3d3d  # Cinza médio
+COR_DESTAQUE    = 0x4a4a4a  # Cinza claro
 
 for var, nome in [(DISCORD_TOKEN,"LOJA_DISCORD_TOKEN"),(MP_TOKEN,"MERCADO_PAGO_TOKEN"),(DATABASE_URL,"DATABASE_URL")]:
     if not var:
@@ -46,16 +54,26 @@ pedidos_pendentes = {}
 def gerar_id():
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
 
-def gerar_key():
-    """NEXZY-XXXX-XXXX-XXXX-XXXX  (AES-256 key visual)"""
-    p = [''.join(random.choices(string.ascii_uppercase + string.digits, k=4)) for _ in range(4)]
-    return f"NEXZY-{'-'.join(p)}"
+def gerar_senha_arquivo():
+    """Gera senha única para o .7z (32 caracteres)"""
+    return ''.join(random.choices(string.ascii_uppercase + string.ascii_lowercase + string.digits, k=32))
 
 def formatar_preco(v):
     return f"R$ {float(v):.2f}".replace(".", ",")
 
 def verificar_7zip():
     return shutil.which("7z") is not None
+
+def criar_embed(titulo="", descricao="", cor=COR_PRINCIPAL):
+    """Cria embed com tema preto padronizado"""
+    embed = Embed(
+        title=titulo,
+        description=descricao,
+        color=cor
+    )
+    embed.set_footer(text="⚫ NEXZY STORE")
+    embed.timestamp = datetime.utcnow()
+    return embed
 
 # ================= BANCO =================
 async def init_db():
@@ -104,12 +122,12 @@ async def init_db():
             """)
             await conn.execute("INSERT INTO vendas (id,total,quantidade) VALUES (1,0,0) ON CONFLICT (id) DO NOTHING")
             await conn.execute("""
-                CREATE TABLE IF NOT EXISTS keys_entregues (
+                CREATE TABLE IF NOT EXISTS vendas_realizadas (
                     id           SERIAL PRIMARY KEY,
                     pedido_id    TEXT NOT NULL,
                     user_id      BIGINT NOT NULL,
                     produto_nome TEXT NOT NULL,
-                    key_valor    TEXT NOT NULL UNIQUE,
+                    valor        REAL NOT NULL,
                     criado_em    TIMESTAMP DEFAULT NOW()
                 )
             """)
@@ -181,28 +199,48 @@ async def add_venda(valor):
     async with db.acquire() as conn:
         await conn.execute("UPDATE vendas SET total=total+$1, quantidade=quantidade+1 WHERE id=1", valor)
 
-async def salvar_key(pedido_id, user_id, produto_nome, key_valor):
+async def registrar_venda_realizada(pedido_id, user_id, produto_nome, valor):
     async with db.acquire() as conn:
         await conn.execute(
-            "INSERT INTO keys_entregues (pedido_id,user_id,produto_nome,key_valor) VALUES ($1,$2,$3,$4)",
-            pedido_id, user_id, produto_nome, key_valor
+            "INSERT INTO vendas_realizadas (pedido_id,user_id,produto_nome,valor) VALUES ($1,$2,$3,$4)",
+            pedido_id, user_id, produto_nome, valor
         )
 
-# ================= WEBHOOK LOG =================
-async def log_webhook(titulo, descricao, cor=0x00ff99, campos=None):
-    try:
-        embed = {
-            "title": titulo,
-            "description": descricao,
-            "color": cor,
-            "timestamp": datetime.utcnow().isoformat(),
-            "footer": {"text": "NEXZY STORE • Sistema de Logs"},
-            "fields": campos or []
-        }
-        async with aiohttp.ClientSession() as s:
-            await s.post(WEBHOOK_LOG_URL, json={"embeds": [embed]})
-    except Exception as e:
-        print(f"Erro webhook log: {e}")
+# ================= LOGS NOS CANAIS =================
+async def log_venda(pedido_id, user, produto, valor, senha_arquivo=None):
+    """Envia log de venda no canal CANAL_LOG_VENDAS"""
+    canal = bot.get_channel(CANAL_LOG_VENDAS)
+    if not canal:
+        return
+    
+    embed = criar_embed(
+        titulo="🖤 VENDA FINALIZADA",
+        descricao="Nova compra aprovada com sucesso!",
+        cor=COR_SUCESSO
+    )
+    embed.add_field(name="🆔 Pedido", value=f"`{pedido_id}`", inline=True)
+    embed.add_field(name="👤 Comprador", value=f"<@{user.id}> ({user.name})", inline=True)
+    embed.add_field(name="📦 Produto", value=produto, inline=True)
+    embed.add_field(name="💰 Valor", value=formatar_preco(valor), inline=True)
+    embed.add_field(name="🔐 Senha .7z", value=f"`{senha_arquivo}`" if senha_arquivo else "Sem arquivo", inline=False)
+    embed.add_field(name="📂 Status", value="✅ Arquivo criptografado enviado" if senha_arquivo else "❌ Produto sem arquivo", inline=True)
+    
+    await canal.send(embed=embed)
+
+async def log_admin(acao, admin, detalhes, cor=COR_DESTAQUE):
+    """Envia log de ações admin no canal CANAL_LOG_ADMIN"""
+    canal = bot.get_channel(CANAL_LOG_ADMIN)
+    if not canal:
+        return
+    
+    embed = criar_embed(
+        titulo=f"⚙️ ADMIN • {acao}",
+        descricao=detalhes,
+        cor=cor
+    )
+    embed.add_field(name="👑 Admin", value=f"<@{admin.id}> ({admin.name})", inline=True)
+    
+    await canal.send(embed=embed)
 
 # ================= CRIPTOGRAFIA 7ZIP =================
 def _criar_7z_sync(dados: bytes, nome_original: str, senha: str) -> bytes:
@@ -219,9 +257,6 @@ def _criar_7z_sync(dados: bytes, nome_original: str, senha: str) -> bytes:
 
         caminho_saida = os.path.join(tmp, "entrega.7z")
 
-        # -p<senha>  = senha AES-256
-        # -mhe=on    = criptografa também lista de arquivos internos
-        # -mx=0      = sem compressão (só cifra, mais rápido)
         resultado = subprocess.run(
             ["7z", "a", f"-p{senha}", "-mhe=on", "-mx=0", caminho_saida, caminho_original],
             capture_output=True, text=True, timeout=120
@@ -240,29 +275,24 @@ async def criar_7z_criptografado(dados: bytes, nome_original: str, senha: str) -
 
 # ================= ENTREGA =================
 async def entregar_produto(user: discord.User, produto: dict, pedido_id: str):
-    key = gerar_key()
-    await salvar_key(pedido_id, user.id, produto["nome"], key)
-
     prod_completo = await get_produto_completo(produto["id"])
     tem_arquivo   = prod_completo and prod_completo["arquivo_data"]
+    
+    senha_arquivo = gerar_senha_arquivo() if tem_arquivo else None
 
-    embed = Embed(
-        title="✅  COMPRA APROVADA — NEXZY STORE",
-        description=f"Obrigado pela compra, **{user.display_name}**! Seu acesso está pronto abaixo.",
-        color=Color.green()
+    embed = criar_embed(
+        titulo="🖤 COMPRA APROVADA — NEXZY STORE",
+        descricao=f"Obrigado pela compra, **{user.display_name}**! Seu produto está pronto.",
+        cor=COR_SUCESSO
     )
-    embed.add_field(name="📦 Produto",        value=produto["nome"],               inline=True)
-    embed.add_field(name="💰 Valor Pago",      value=formatar_preco(produto["preco"]), inline=True)
-    embed.add_field(name="\u200b",             value="\u200b",                      inline=True)
-    embed.add_field(name="🔑 Key de Ativação", value=f"```\n{key}\n```",            inline=False)
+    embed.add_field(name="📦 Produto", value=f"{produto['emoji']} {produto['nome']}", inline=True)
+    embed.add_field(name="💰 Valor Pago", value=formatar_preco(produto["preco"]), inline=True)
+    embed.add_field(name="\u200b", value="\u200b", inline=True)
 
     arquivo_discord = None
 
     if tem_arquivo:
         try:
-            # Senha = key sem hifens (32 chars hex-like, derivado da própria key)
-            senha_arquivo = key.replace("-", "")
-
             embed.add_field(
                 name="🔐 Senha do Arquivo (.7z)",
                 value=f"```\n{senha_arquivo}\n```",
@@ -284,7 +314,7 @@ async def entregar_produto(user: discord.User, produto: dict, pedido_id: str):
                 senha_arquivo
             )
 
-            nome_saida      = f"nexzy_{produto['id']}_{pedido_id[:8]}.7z"
+            nome_saida = f"nexzy_{produto['id']}_{pedido_id[:8]}.7z"
             arquivo_discord = discord.File(fp=io.BytesIO(dados_cifrados), filename=nome_saida)
 
         except Exception as e:
@@ -293,11 +323,11 @@ async def entregar_produto(user: discord.User, produto: dict, pedido_id: str):
     else:
         embed.add_field(
             name="📋 Próximos passos",
-            value="Use sua key no painel de ativação ou abra um ticket.",
+            value="Seu produto foi ativado! Entre em contato se precisar de ajuda.",
             inline=False
         )
 
-    embed.set_footer(text="NEXZY STORE — Obrigado pela preferência! 💚")
+    embed.set_footer(text="⚫ NEXZY STORE • Obrigado pela preferência!")
     embed.timestamp = datetime.utcnow()
 
     try:
@@ -308,18 +338,9 @@ async def entregar_produto(user: discord.User, produto: dict, pedido_id: str):
     except discord.Forbidden:
         print(f"❌ DM bloqueada: {user}")
 
-    await log_webhook(
-        "💸 Nova Venda!",
-        "Compra aprovada e produto entregue.",
-        cor=0x2ecc71,
-        campos=[
-            {"name": "👤 Comprador", "value": f"<@{user.id}> ({user.name})", "inline": True},
-            {"name": "📦 Produto",   "value": produto["nome"],               "inline": True},
-            {"name": "💰 Valor",     "value": formatar_preco(produto["preco"]), "inline": True},
-            {"name": "🔑 Key",       "value": f"`{key}`",                    "inline": False},
-            {"name": "📂 Arquivo",   "value": "✅ Enviado" if tem_arquivo else "❌ Sem arquivo", "inline": True},
-        ]
-    )
+    # Registrar venda e enviar logs
+    await registrar_venda_realizada(pedido_id, user.id, produto["nome"], produto["preco"])
+    await log_venda(pedido_id, user, produto["nome"], produto["preco"], senha_arquivo)
 
 # ================= MODALS =================
 class ProdutoModal(discord.ui.Modal, title="✨ Adicionar Produto"):
@@ -343,19 +364,18 @@ class ProdutoModal(discord.ui.Modal, title="✨ Adicionar Produto"):
 
             await add_produto(pid, nome, preco, emoji, descricao)
 
-            embed = Embed(title="✅ Produto Adicionado!", color=Color.green())
+            embed = criar_embed(titulo="✅ Produto Adicionado!", cor=COR_SUCESSO)
             embed.add_field(name="🆔 ID",    value=f"`{pid}`",           inline=True)
             embed.add_field(name="📦 Nome",  value=nome,                 inline=True)
             embed.add_field(name="💰 Preço", value=formatar_preco(preco), inline=True)
             embed.add_field(
                 name="📂 Vincular arquivo",
-                value=f"Envie: `!upload {pid}` com o arquivo `.rar` ou `.zip` anexado.",
+                value=f"Envie: `!upload {pid}` com o arquivo anexado.",
                 inline=False
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
             await atualizar_loja()
-            await log_webhook("📦 Produto Adicionado", f"**{nome}** • {formatar_preco(preco)}", cor=0x00ff99,
-                              campos=[{"name": "Admin", "value": f"<@{interaction.user.id}>", "inline": True}])
+            await log_admin("Produto Adicionado", interaction.user, f"**{nome}** • {formatar_preco(preco)} • ID: `{pid}`")
         except Exception as e:
             await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
 
@@ -381,8 +401,7 @@ class EditarProdutoModal(discord.ui.Modal, title="✏️ Editar Produto"):
             await edit_produto(self.produto_id, nome, preco, emoji, descricao)
             await interaction.followup.send("✅ Produto editado com sucesso!", ephemeral=True)
             await atualizar_loja()
-            await log_webhook("✏️ Produto Editado", f"**{nome}**", cor=0x3498db,
-                              campos=[{"name": "Admin", "value": f"<@{interaction.user.id}>", "inline": True}])
+            await log_admin("Produto Editado", interaction.user, f"**{nome}** • {formatar_preco(preco)} • ID: `{self.produto_id}`")
         except Exception as e:
             await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
 
@@ -403,8 +422,7 @@ class RemoverSelect(discord.ui.Select):
         await remove_produto(self.values[0])
         await interaction.followup.send(f"✅ **{nome}** removido!", ephemeral=True)
         await atualizar_loja()
-        await log_webhook("🗑️ Produto Removido", f"**{nome}**", cor=0xe74c3c,
-                          campos=[{"name": "Admin", "value": f"<@{interaction.user.id}>", "inline": True}])
+        await log_admin("Produto Removido", interaction.user, f"**{nome}** • ID: `{self.values[0]}`", cor=COR_ERRO)
 
 
 class EditarSelect(discord.ui.Select):
@@ -453,14 +471,13 @@ class LojaButtons(discord.ui.View):
     async def admin(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not any(r.id == CARGO_DONO for r in interaction.user.roles):
             return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
-        embed = Embed(title="⚙️ Painel Admin — NEXZY STORE", color=Color.dark_red())
+        embed = criar_embed(titulo="⚙️ Painel Admin — NEXZY STORE", cor=COR_ERRO)
         embed.add_field(name="➕ Adicionar",         value="Cadastra produto",                   inline=True)
         embed.add_field(name="✏️ Editar",            value="Altera nome/preço/emoji",            inline=True)
         embed.add_field(name="🗑️ Remover",           value="Remove produto",                     inline=True)
         embed.add_field(name="🧪 Teste de Entrega",  value="Simula compra (DM)",                 inline=True)
         embed.add_field(name="📊 Estatísticas",      value="Ver faturamento",                    inline=True)
         embed.add_field(name="📂 Upload",            value="`!upload <id>` com arquivo anexado", inline=True)
-        embed.set_footer(text="NEXZY STORE — Painel Admin")
         await interaction.response.send_message(embed=embed, view=AdminView(), ephemeral=True)
 
 
@@ -535,21 +552,19 @@ async def iniciar_pagamento(interaction: discord.Interaction, produto_id: str):
         pay_id = resp["id"]
         pedidos_pendentes[pay_id] = pedido_id
 
-        embed = Embed(
-            title="💳  PAGAMENTO VIA PIX",
-            description=f"**{produto['emoji']} {produto['nome']}**\n💰 **{formatar_preco(produto['preco'])}**",
-            color=0x00b300
+        embed = criar_embed(
+            titulo="💳 PAGAMENTO VIA PIX",
+            descricao=f"**{produto['emoji']} {produto['nome']}**\n💰 **{formatar_preco(produto['preco'])}**",
+            cor=COR_PENDENTE
         )
         embed.add_field(name="🏢 Destinatário", value="**NEXZY STORE**", inline=True)
-        embed.add_field(name="⏰ Validade",      value="**30 minutos**",  inline=True)
+        embed.add_field(name="⏰ Validade", value="**30 minutos**", inline=True)
         embed.add_field(name="📋 Código PIX — Copia e Cola", value=f"```\n{pix[:300]}\n```", inline=False)
         embed.add_field(
             name="📱 Como Pagar",
             value="**1.** Copie o código\n**2.** Abra seu banco\n**3.** PIX → Copia e Cola\n**4.** Cole e confirme\n**5.** Clique em ✅ **JÁ PAGUEI**",
             inline=False
         )
-        embed.set_footer(text="NEXZY STORE — Pagamento seguro via PIX")
-        embed.timestamp = datetime.utcnow()
 
         view = discord.ui.View()
         view.add_item(discord.ui.Button(label="✅ JÁ PAGUEI", style=discord.ButtonStyle.success, custom_id=f"check_{pay_id}"))
@@ -557,9 +572,6 @@ async def iniciar_pagamento(interaction: discord.Interaction, produto_id: str):
 
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
         asyncio.create_task(verificar_pagamento(pay_id, pedido_id, interaction.user, produto))
-
-        await log_webhook("🕐 Pedido Iniciado", f"**{produto['nome']}** • {formatar_preco(produto['preco'])}", cor=0xf1c40f,
-                          campos=[{"name": "👤 Usuário", "value": f"<@{interaction.user.id}>", "inline": True}])
     except Exception as e:
         print(f"Erro PIX: {e}")
         await interaction.followup.send(f"❌ Erro ao gerar PIX: {str(e)[:200]}", ephemeral=True)
@@ -583,38 +595,34 @@ async def verificar_pagamento(payment_id, pedido_id, user, produto):
 # ================= EMBEDS =================
 async def montar_embed_loja():
     produtos = await get_produtos()
-    embed = Embed(
-        title="🛒  N E X Z Y  S T O R E",
-        description=(
+    embed = criar_embed(
+        titulo="🖤 N E X Z Y  S T O R E",
+        descricao=(
             "╔══════════════════════════╗\n"
             "💎 **Compre via PIX e receba na hora!**\n"
             "🔐 Arquivo criptografado exclusivo por compra\n"
-            "🔑 Key única gerada automaticamente\n"
             "╚══════════════════════════╝"
-        ),
-        color=0x00ff99
+        )
     )
-    for p in produtos.values():
+    for pid, p in produtos.items():
         desc    = p.get("descricao") or ""
-        arquivo = "📂 Arquivo incluído" if p.get("arquivo_nome") else "🔑 Key de ativação"
+        arquivo = "📂 Arquivo incluído" if p.get("arquivo_nome") else "🔑 Acesso imediato"
         embed.add_field(
             name=f"{p['emoji']}  {p['nome']}",
-            value=f"**{formatar_preco(p['preco'])}**\n{arquivo}" + (f"\n> {desc}" if desc else ""),
+            value=f"**{formatar_preco(p['preco'])}**\n🆔 `{pid}`\n{arquivo}" + (f"\n> {desc}" if desc else ""),
             inline=True
         )
-    embed.set_footer(text="NEXZY STORE • Clique em 💰 COMPRAR")
+    embed.set_footer(text="⚫ NEXZY STORE • Clique em 💰 COMPRAR")
     embed.timestamp = datetime.utcnow()
     return embed
 
 
 async def montar_embed_vendas():
     total, qtd = await get_vendas()
-    embed = Embed(title="📊  ESTATÍSTICAS — NEXZY STORE", color=0xf1c40f)
+    embed = criar_embed(titulo="📊 ESTATÍSTICAS — NEXZY STORE", cor=COR_DESTAQUE)
     embed.add_field(name="📦 Vendas",       value=f"**{qtd}** pedidos",                        inline=True)
     embed.add_field(name="💰 Faturamento",  value=f"**{formatar_preco(total)}**",               inline=True)
     embed.add_field(name="📈 Ticket Médio", value=formatar_preco(total/qtd) if qtd else "R$ 0,00", inline=True)
-    embed.set_footer(text="NEXZY STORE")
-    embed.timestamp = datetime.utcnow()
     return embed
 
 
@@ -732,11 +740,8 @@ async def cmd_upload(ctx, produto_id: str = None):
             f"Cada compra receberá o `.7z` criptografado com senha exclusiva."
         ))
         await atualizar_loja()
-        await log_webhook("📂 Arquivo Vinculado", f"**{att.filename}** → produto `{produto_id}`", cor=0x9b59b6,
-                          campos=[
-                              {"name": "Admin",   "value": f"<@{ctx.author.id}>", "inline": True},
-                              {"name": "Tamanho", "value": f"{size_mb:.2f} MB",   "inline": True}
-                          ])
+        await log_admin("Upload de Arquivo", ctx.author, 
+            f"**{att.filename}** • {size_mb:.2f} MB • Produto: `{produto_id}` — {produtos[produto_id]['nome']}")
     except Exception as e:
         await msg.edit(content=f"❌ Erro ao salvar arquivo: {e}")
 
@@ -751,6 +756,7 @@ async def cmd_remover_arquivo(ctx, produto_id: str = None):
     await remover_arquivo_produto(produto_id)
     await ctx.reply(f"✅ Arquivo removido do produto `{produto_id}`.")
     await atualizar_loja()
+    await log_admin("Arquivo Removido", ctx.author, f"Produto: `{produto_id}`")
 
 
 @bot.command(name="check7z")
@@ -767,19 +773,6 @@ async def cmd_check7z(ctx):
         await ctx.reply("❌ **7-Zip NÃO encontrado.**\nVerifique se o `Dockerfile` está correto e o deploy foi feito.")
 
 
-@bot.command(name="produtos")
-async def cmd_produtos(ctx):
-    """Lista todos os produtos com seus IDs (apenas admin)"""
-    if not any(r.id == CARGO_DONO for r in ctx.author.roles):
-        return
-    produtos = await get_produtos()
-    if not produtos:
-        return await ctx.reply("Nenhum produto cadastrado.")
-    linhas = [f"{p['emoji']} `{pid}` — **{p['nome']}** — {formatar_preco(p['preco'])} {'📂' if p.get('arquivo_nome') else '🔑'}" for pid, p in produtos.items()]
-    embed = Embed(title="📦 Produtos Cadastrados", description="\n".join(linhas), color=0x00ff99)
-    embed.set_footer(text="📂 = tem arquivo  🔑 = só key")
-    await ctx.reply(embed=embed)
-
 # ================= EVENTOS =================
 @bot.event
 async def on_ready():
@@ -793,7 +786,6 @@ async def on_ready():
     asyncio.create_task(start_server())
     await atualizar_loja()
     await atualizar_vendas()
-    await log_webhook("🟢 Bot Online", f"**NEXZY STORE** iniciou com sucesso!\nBot: `{bot.user}`", cor=0x2ecc71)
     print("✅ Pronto!")
 
 
@@ -810,7 +802,7 @@ async def on_interaction(interaction: discord.Interaction):
             info   = sdk.payment().get(pay_id)
             status = info["response"].get("status")
             msgs   = {
-                "approved": "✅ **Pagamento aprovado!** Verifique sua DM — sua key e arquivo foram enviados.",
+                "approved": "✅ **Pagamento aprovado!** Verifique sua DM — seu produto foi enviado.",
                 "pending":  "⏳ Ainda **pendente**. Aguarde o banco processar e tente novamente.",
                 "rejected": "❌ Pagamento **recusado**. Tente gerar um novo código."
             }
