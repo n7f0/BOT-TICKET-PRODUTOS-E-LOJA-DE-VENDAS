@@ -1,4 +1,4 @@
-# bot.py - VERSÃO FINAL COM PIX COPIA E COLA
+# bot.py - VERSÃO FINAL COM NOME DA LOJA
 import discord
 from discord.ext import commands
 from discord import Embed, Color
@@ -217,18 +217,40 @@ async def iniciar_pagamento(interaction: discord.Interaction, produto_id):
         return await interaction.followup.send("❌ Produto não encontrado", ephemeral=True)
     
     try:
-        payment = sdk.payment().create({
+        # Criar pagamento com nome da loja
+        payment_data = {
             "transaction_amount": float(produto["preco"]),
-            "description": produto["nome"],
+            "description": f"{produto['nome']} - Nexzy Store",
             "payment_method_id": "pix",
-            "payer": {"email": f"user{interaction.user.id}@email.com"}
-        })
+            "payer": {
+                "email": f"nexzy_{interaction.user.id}@nexzystore.com.br",
+                "first_name": interaction.user.name[:50] if interaction.user.name else "Cliente",
+                "identification": {
+                    "type": "CPF",
+                    "number": "00000000000"
+                }
+            },
+            "additional_info": {
+                "items": [
+                    {
+                        "id": produto_id,
+                        "title": produto["nome"],
+                        "description": f"Compra realizada na Nexzy Store",
+                        "category_id": "games",
+                        "quantity": 1,
+                        "unit_price": float(produto["preco"])
+                    }
+                ]
+            },
+            "statement_descriptor": "NEXZY STORE"
+        }
         
+        payment = sdk.payment().create(payment_data)
         resp = payment["response"]
+        
         pedido_id = str(uuid.uuid4())
         await add_pedido(pedido_id, interaction.user.id, produto_id, produto["nome"], produto["preco"])
         
-        # Usando o campo correto: qr_code (código copia e cola)
         pix_copia_cola = resp["point_of_interaction"]["transaction_data"]["qr_code"]
         payment_id = resp["id"]
         pedidos_pendentes[payment_id] = pedido_id
@@ -237,6 +259,12 @@ async def iniciar_pagamento(interaction: discord.Interaction, produto_id):
             title="💳 **PAGAMENTO PIX**", 
             description=f"**{produto['nome']}**\n{formatar_preco(produto['preco'])}", 
             color=Color.green()
+        )
+        
+        embed.add_field(
+            name="🏢 **QUEM RECEBE**",
+            value="**NEXZY STORE**\nLoja Oficial",
+            inline=False
         )
         
         embed.add_field(
@@ -296,7 +324,8 @@ async def entregar_produto(user, produto):
     embed = Embed(title="✅ **COMPRA APROVADA!**", description=f"{produto['nome']} - {formatar_preco(produto['preco'])}", color=Color.green())
     embed.add_field(name="🔑 **SUA KEY**", value=f"```\n{key}\n```", inline=False)
     embed.add_field(name="📁 **PRODUTO**", value="Produto entregue com sucesso!", inline=False)
-    embed.set_footer(text="Obrigado pela compra!")
+    embed.add_field(name="🏢 **NEXZY STORE**", value="Obrigado pela compra!", inline=False)
+    embed.set_footer(text="Volte sempre!")
     try:
         await user.send(embed=embed)
     except:
@@ -307,6 +336,7 @@ async def montar_embed_loja():
     produtos = await get_produtos()
     embed = Embed(title="🛒 **NEXZY STORE**", description="💎 Compre via PIX e receba na hora", color=Color.blue())
     embed.set_image(url="https://media.discordapp.net/attachments/1491808878562643998/1491808965170958396/e6876514-c5ae-477f-a84b-d7b7db0c01e5.png")
+    embed.set_footer(text="NEXZY STORE - Loja Oficial")
     for p in produtos.values():
         embed.add_field(name=f"{p['emoji']} {p['nome']}", value=formatar_preco(p['preco']), inline=True)
     embed.set_footer(text="Clique em COMPRAR para adquirir")
@@ -314,9 +344,10 @@ async def montar_embed_loja():
 
 async def montar_embed_vendas():
     total, qtd = await get_vendas()
-    embed = Embed(title="📊 **ESTATÍSTICAS**", color=Color.gold())
+    embed = Embed(title="📊 **ESTATÍSTICAS NEXZY STORE**", color=Color.gold())
     embed.add_field(name="📦 Vendas", value=str(qtd), inline=True)
     embed.add_field(name="💰 Faturamento", value=formatar_preco(total), inline=True)
+    embed.set_footer(text="NEXZY STORE")
     return embed
 
 async def atualizar_loja():
@@ -384,6 +415,7 @@ async def cmd_vendas(ctx):
 @bot.event
 async def on_ready():
     print(f"✅ Bot: {bot.user}")
+    print("🏢 NEXZY STORE - Loja Oficial")
     if not await init_db():
         return
     print(f"🛒 Loja: {CANAL_LOJA}")
