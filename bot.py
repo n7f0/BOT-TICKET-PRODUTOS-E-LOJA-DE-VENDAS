@@ -206,6 +206,15 @@ async def registrar_venda_realizada(pedido_id, user_id, produto_nome, valor):
             pedido_id, user_id, produto_nome, valor
         )
 
+async def limpar_banco_completo():
+    """Limpa TODAS as tabelas do banco de dados"""
+    async with db.acquire() as conn:
+        await conn.execute("DELETE FROM vendas_realizadas")
+        await conn.execute("DELETE FROM pedidos")
+        await conn.execute("DELETE FROM produtos")
+        await conn.execute("UPDATE vendas SET total=0, quantidade=0 WHERE id=1")
+    print("🗑️ Banco de dados completamente limpo!")
+
 # ================= LOGS NOS CANAIS =================
 async def log_venda(pedido_id, user, produto, valor, senha_arquivo=None):
     """Envia log de venda no canal CANAL_LOG_VENDAS"""
@@ -454,6 +463,60 @@ class ProdutoSelect(discord.ui.Select):
         await iniciar_pagamento(interaction, self.values[0])
 
 # ================= VIEWS =================
+class ConfirmacaoLimpezaView(discord.ui.View):
+    def __init__(self, interaction_original):
+        super().__init__(timeout=60)
+        self.interaction_original = interaction_original
+
+    async def on_timeout(self):
+        try:
+            await self.interaction_original.edit_original_response(content="⏰ Tempo de confirmação expirado.", embed=None, view=None)
+        except Exception:
+            pass
+
+    @discord.ui.button(label="✅ CONFIRMAR LIMPEZA", style=discord.ButtonStyle.danger, emoji="⚠️")
+    async def confirmar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.interaction_original.user.id:
+            return await interaction.response.send_message("❌ Apenas quem iniciou pode confirmar.", ephemeral=True)
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        # Limpar banco
+        await limpar_banco_completo()
+        
+        # Atualizar loja e vendas
+        await atualizar_loja()
+        await atualizar_vendas()
+        
+        # Log
+        await log_admin("🗑️ Banco de Dados Limpo", interaction.user, 
+            "**TODO** o banco de dados foi limpo:\n"
+            "• Produtos removidos\n"
+            "• Pedidos removidos\n"
+            "• Vendas registradas removidas\n"
+            "• Arquivos removidos\n"
+            "• Estatísticas zeradas",
+            cor=COR_ERRO
+        )
+        
+        # Atualizar mensagem original
+        embed = criar_embed(titulo="✅ Banco de Dados Limpo", descricao="Todas as tabelas foram limpas com sucesso!", cor=COR_SUCESSO)
+        await self.interaction_original.edit_original_response(embed=embed, view=None)
+        
+        await interaction.followup.send("✅ Banco limpo com sucesso!", ephemeral=True)
+
+    @discord.ui.button(label="❌ CANCELAR", style=discord.ButtonStyle.secondary)
+    async def cancelar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.interaction_original.user.id:
+            return await interaction.response.send_message("❌ Apenas quem iniciou pode cancelar.", ephemeral=True)
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        embed = criar_embed(titulo="❌ Limpeza Cancelada", descricao="O banco de dados **não** foi alterado.", cor=COR_DESTAQUE)
+        await self.interaction_original.edit_original_response(embed=embed, view=None)
+        await interaction.followup.send("✅ Operação cancelada.", ephemeral=True)
+
+
 class LojaButtons(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -472,12 +535,14 @@ class LojaButtons(discord.ui.View):
         if not any(r.id == CARGO_DONO for r in interaction.user.roles):
             return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
         embed = criar_embed(titulo="⚙️ Painel Admin — NEXZY STORE", cor=COR_ERRO)
-        embed.add_field(name="➕ Adicionar",         value="Cadastra produto",                   inline=True)
-        embed.add_field(name="✏️ Editar",            value="Altera nome/preço/emoji",            inline=True)
-        embed.add_field(name="🗑️ Remover",           value="Remove produto",                     inline=True)
-        embed.add_field(name="🧪 Teste de Entrega",  value="Simula compra (DM)",                 inline=True)
-        embed.add_field(name="📊 Estatísticas",      value="Ver faturamento",                    inline=True)
-        embed.add_field(name="📂 Upload",            value="`!upload <id>` com arquivo anexado", inline=True)
+        embed.add_field(name="➕ Adicionar", value="Cadastra produto", inline=True)
+        embed.add_field(name="✏️ Editar", value="Altera nome/preço/emoji", inline=True)
+        embed.add_field(name="🗑️ Remover", value="Remove produto", inline=True)
+        embed.add_field(name="📂 Ver Arquivos", value="Visualiza arquivos do banco", inline=True)
+        embed.add_field(name="🧹 Limpar Banco", value="Limpa TODO o banco de dados", inline=True)
+        embed.add_field(name="🧪 Teste de Entrega", value="Simula compra (DM)", inline=True)
+        embed.add_field(name="📊 Estatísticas", value="Ver faturamento", inline=True)
+        embed.add_field(name="📂 Upload", value="`!upload <id>` com arquivo anexado", inline=True)
         await interaction.response.send_message(embed=embed, view=AdminView(), ephemeral=True)
 
 
@@ -506,6 +571,69 @@ class AdminView(discord.ui.View):
         view = discord.ui.View()
         view.add_item(RemoverSelect(produtos))
         await interaction.response.send_message("🗑️ Selecione o produto:", view=view, ephemeral=True)
+
+    @discord.ui.button(label="📂 Ver Arquivos", style=discord.ButtonStyle.secondary, emoji="📁")
+    async def ver_arquivos(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        
+        async with db.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, nome, arquivo_nome, LENGTH(arquivo_data) as tamanho_bytes FROM produtos WHERE arquivo_data IS NOT NULL"
+            )
+        
+        if not rows:
+            embed = criar_embed(
+                titulo="📂 Arquivos no Banco de Dados",
+                descricao="*Nenhum arquivo encontrado no banco de dados.*",
+                cor=COR_DESTAQUE
+            )
+            return await interaction.followup.send(embed=embed, ephemeral=True)
+        
+        embed = criar_embed(
+            titulo="📂 Arquivos no Banco de Dados",
+            descricao=f"**{len(rows)}** arquivo(s) encontrado(s):",
+            cor=COR_DESTAQUE
+        )
+        
+        total_bytes = 0
+        for row in rows:
+            tamanho_mb = row["tamanho_bytes"] / (1024 * 1024)
+            total_bytes += row["tamanho_bytes"]
+            embed.add_field(
+                name=f"📦 {row['nome']} (`{row['id']}`)",
+                value=f"📄 `{row['arquivo_nome']}`\n📏 **{tamanho_mb:.2f} MB**",
+                inline=False
+            )
+        
+        total_mb = total_bytes / (1024 * 1024)
+        embed.add_field(
+            name="📊 Total",
+            value=f"**{len(rows)}** arquivos • **{total_mb:.2f} MB** ocupados no banco",
+            inline=False
+        )
+        
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="🧹 Limpar Banco", style=discord.ButtonStyle.danger, emoji="⚠️")
+    async def limpar_banco(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = criar_embed(
+            titulo="⚠️ CONFIRMAÇÃO DE LIMPEZA",
+            descricao=(
+                "**ATENÇÃO!** Esta ação irá:\n\n"
+                "🗑️ Remover **TODOS** os produtos\n"
+                "🗑️ Remover **TODOS** os pedidos\n"
+                "🗑️ Remover **TODOS** os arquivos\n"
+                "🗑️ Remover **TODO** histórico de vendas\n"
+                "🗑️ Zerar **TODAS** as estatísticas\n\n"
+                "⚠️ **Esta ação é IRREVERSÍVEL!**\n\n"
+                "Clique em ✅ **CONFIRMAR LIMPEZA** para prosseguir\n"
+                "ou ❌ **CANCELAR** para abortar."
+            ),
+            cor=COR_ERRO
+        )
+        
+        view = ConfirmacaoLimpezaView(interaction)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     @discord.ui.button(label="🧪 Teste de Entrega", style=discord.ButtonStyle.secondary)
     async def teste(self, interaction: discord.Interaction, button: discord.ui.Button):
