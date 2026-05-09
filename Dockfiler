@@ -1,18 +1,21 @@
 FROM python:3.11-slim
 
-WORKDIR /app
-
-# Instalar dependências
+# Instala dependências do sistema (PostgreSQL, 7zip, compiladores)
 RUN apt-get update && apt-get install -y \
     gcc \
     libpq-dev \
+    p7zip-full \
     && rm -rf /var/lib/apt/lists/*
 
+WORKDIR /app
+
+# Copia e instala dependências Python
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copia o código do bot
 COPY bot.py .
 COPY patch.py .
 
-# Comando com tratamento de erro
-CMD ["sh", "-c", "while true; do python bot.py; sleep 5; done"]
+# Comando com loop infinito (reinicia automaticamente se o bot falhar)
+CMD ["sh", "-c", "while true; do python bot.py; echo 'Bot caiu, reiniciando em 5 segundos...'; sleep 5; done"]
