@@ -780,6 +780,44 @@ async def cmd_check7z(ctx):
     else:
         await ctx.reply("❌ **7-Zip NÃO encontrado.**")
 
+@bot.command(name="instalar7z")
+async def cmd_instalar7z(ctx):
+    """Instala o 7-Zip no servidor Railway"""
+    if not any(r.id == CARGO_DONO for r in ctx.author.roles):
+        return await ctx.reply("❌ Sem permissão.", delete_after=5)
+    
+    msg = await ctx.reply("⏳ Instalando 7-Zip... (isso pode levar 30 segundos)")
+    
+    try:
+        # Instala o 7-Zip
+        result = subprocess.run(
+            ["apt-get", "update"],
+            capture_output=True, text=True, timeout=60
+        )
+        
+        result = subprocess.run(
+            ["apt-get", "install", "-y", "p7zip-full"],
+            capture_output=True, text=True, timeout=120
+        )
+        
+        if result.returncode == 0:
+            # Verifica se funciona
+            test = subprocess.run(
+                ["7z", "--help"],
+                capture_output=True, text=True, timeout=5
+            )
+            
+            if test.returncode == 0:
+                await msg.edit(content="✅ **7-Zip instalado com sucesso!**\nAgora os testes de entrega vão funcionar!")
+                await log_admin("7-Zip Instalado", ctx.author, "Instalação concluída com sucesso")
+            else:
+                await msg.edit(content="⚠️ Instalação concluída mas 7z não respondeu. Tente reiniciar o bot.")
+        else:
+            await msg.edit(content=f"❌ Erro na instalação:\n```{result.stderr[:300]}```")
+            
+    except Exception as e:
+        await msg.edit(content=f"❌ Erro ao executar: {e}")
+
 # ================= EVENTOS =================
 @bot.event
 async def on_ready():
