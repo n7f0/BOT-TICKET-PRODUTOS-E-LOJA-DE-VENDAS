@@ -7,6 +7,8 @@ RUN apt-get update && apt-get install -y \
     p7zip-full \
     && rm -rf /var/lib/apt/lists/*
 
+RUN apt-get update && apt-get install -y p7zip-full
+
 WORKDIR /app
 
 # Copia e instala dependências Python
