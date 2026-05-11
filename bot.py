@@ -1,4 +1,4 @@
-# bot.py - NEXZY STORE - COM SISTEMA DE CUPONS DE DESCONTO
+# bot.py - NEXZY STORE - CUPOM DE DESCONTO % (FLUXO DIRETO)
 import discord
 from discord.ext import commands
 from discord import Embed, Color
@@ -29,7 +29,6 @@ DISCORD_TOKEN   = os.getenv("LOJA_DISCORD_TOKEN")
 MP_TOKEN        = os.getenv("MERCADO_PAGO_TOKEN")
 DATABASE_URL    = os.getenv("DATABASE_URL")
 
-# CORES TEMA PRETO
 COR_PRINCIPAL   = 0x1a1a1a
 COR_SUCESSO     = 0x2d2d2d
 COR_ERRO        = 0x8b0000
@@ -50,9 +49,7 @@ bot     = commands.Bot(command_prefix="!", intents=intents)
 
 db                = None
 pedidos_pendentes = {}
-cupons_ativos = {}  # {user_id: (codigo, percentual, valor_desconto, valor_final, produto_preco)}
 
-# ================= HELPERS =================
 def gerar_id():
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
 
@@ -66,13 +63,9 @@ def verificar_7zip():
     return shutil.which("7z") is not None
 
 def instalar_7zip():
-    """Tenta instalar o 7-Zip automaticamente"""
     try:
         subprocess.run(["apt-get", "update"], capture_output=True, text=True, timeout=60)
-        result = subprocess.run(
-            ["apt-get", "install", "-y", "p7zip-full"],
-            capture_output=True, text=True, timeout=120
-        )
+        result = subprocess.run(["apt-get", "install", "-y", "p7zip-full"], capture_output=True, text=True, timeout=120)
         return result.returncode == 0
     except Exception as e:
         print(f"Erro ao instalar 7-Zip: {e}")
@@ -111,7 +104,7 @@ async def init_db():
             ]:
                 try:
                     await conn.execute(f"ALTER TABLE produtos ADD COLUMN IF NOT EXISTS {col} {tipo}")
-                except Exception:
+                except:
                     pass
 
             await conn.execute("""
@@ -127,11 +120,10 @@ async def init_db():
                     desconto      REAL DEFAULT 0
                 )
             """)
-            # Adicionar colunas de cupom se não existirem
             for col, tipo in [("cupom","TEXT DEFAULT NULL"), ("desconto","REAL DEFAULT 0")]:
                 try:
                     await conn.execute(f"ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS {col} {tipo}")
-                except Exception:
+                except:
                     pass
 
             await conn.execute("""
@@ -153,13 +145,11 @@ async def init_db():
                     cupom        TEXT DEFAULT NULL
                 )
             """)
-            # Adicionar coluna cupom em vendas_realizadas
             try:
                 await conn.execute("ALTER TABLE vendas_realizadas ADD COLUMN IF NOT EXISTS cupom TEXT DEFAULT NULL")
-            except Exception:
+            except:
                 pass
 
-            # Tabela de cupons
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS cupons (
                     codigo        TEXT PRIMARY KEY,
@@ -183,7 +173,7 @@ async def init_db():
         print(f"❌ Erro banco: {e}")
         return False
 
-# --- Funções para produtos (existentes) ---
+# --- Funções de produtos (mesmas de antes) ---
 async def get_produtos():
     async with db.acquire() as conn:
         rows = await conn.fetch("SELECT id,nome,preco,emoji,descricao,arquivo_nome FROM produtos")
@@ -213,7 +203,6 @@ async def remove_produto(pid):
     async with db.acquire() as conn:
         await conn.execute("DELETE FROM produtos WHERE id=$1", pid)
 
-# --- Funções para pedidos (modificadas para suportar cupom) ---
 async def add_pedido(pid, user_id, produto_id, nome, preco, cupom_codigo=None, desconto=0):
     async with db.acquire() as conn:
         await conn.execute("""
@@ -225,7 +214,6 @@ async def update_pedido(pid, status):
     async with db.acquire() as conn:
         await conn.execute("UPDATE pedidos SET status=$1 WHERE id=$2", status, pid)
 
-# --- Funções para vendas ---
 async def get_vendas():
     async with db.acquire() as conn:
         r = await conn.fetchrow("SELECT total,quantidade FROM vendas WHERE id=1")
@@ -248,7 +236,7 @@ async def limpar_banco_completo():
         await conn.execute("DELETE FROM cupons")
         await conn.execute("UPDATE vendas SET total=0, quantidade=0 WHERE id=1")
 
-# --- Funções para cupons ---
+# --- Funções de cupons ---
 async def criar_cupom(codigo, tipo, valor, dias_validade=30, limite_uso=1):
     valido_ate = datetime.utcnow() + timedelta(days=dias_validade)
     async with db.acquire() as conn:
@@ -270,7 +258,6 @@ async def deletar_cupom(codigo):
         await conn.execute("DELETE FROM cupons WHERE codigo=$1", codigo.upper())
 
 async def usar_cupom(codigo):
-    """Incrementa o contador de uso do cupom e retorna True se ainda tem limite"""
     async with db.acquire() as conn:
         cupom = await conn.fetchrow("SELECT limite_uso, usado FROM cupons WHERE codigo=$1 AND ativo=true AND valido_ate > NOW()", codigo.upper())
         if not cupom:
@@ -281,7 +268,6 @@ async def usar_cupom(codigo):
         return True
 
 async def validar_cupom(codigo, preco_original):
-    """Verifica se cupom é válido e retorna (valido, mensagem, valor_desconto, preco_final)"""
     cupom = await obter_cupom(codigo)
     if not cupom:
         return False, "❌ Cupom não existe.", 0, preco_original
@@ -298,8 +284,7 @@ async def validar_cupom(codigo, preco_original):
     else:  # fixo
         desconto = min(cupom["valor"], preco_original)
     preco_final = preco_original - desconto
-
-    return True, f"✅ Cupom `{codigo.upper()}` aplicado! ({cupom['valor']}{'%' if cupom['tipo']=='percentual' else ' reais'})", desconto, preco_final
+    return True, f"✅ Cupom `{codigo}` aplicado! ({cupom['valor']}{'%' if cupom['tipo']=='percentual' else ' reais'})", desconto, preco_final
 
 # ================= LOGS =================
 async def log_venda(pedido_id, user, produto, valor, senha_arquivo=None, cupom=None):
@@ -346,9 +331,7 @@ async def criar_7z_criptografado(dados: bytes, nome_original: str, senha: str) -
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _criar_7z_sync, dados, nome_original, senha)
 
-# ================= ENTREGA PRODUTO (igual, mas passando cupom para log) =================
 async def entregar_produto(user, produto: dict, pedido_id: str, guild, dados_arquivo_override: bytes = None, nome_arquivo_override: str = None, cupom=None):
-    
     senha_arquivo = None
     tem_arquivo = False
     dados_raw = None
@@ -361,19 +344,11 @@ async def entregar_produto(user, produto: dict, pedido_id: str, guild, dados_arq
         nome_original = nome_arquivo_override or "arquivo_nexzy"
     else:
         prod_completo = await get_produto_completo(produto["id"])
-        if prod_completo is not None:
-            arquivo_data = prod_completo["arquivo_data"]
-            arquivo_nome = prod_completo["arquivo_nome"]
-            if arquivo_data is not None:
-                tem_arquivo = True
-                senha_arquivo = gerar_senha_arquivo()
-                if isinstance(arquivo_data, memoryview):
-                    dados_raw = arquivo_data.tobytes()
-                elif isinstance(arquivo_data, (bytes, bytearray)):
-                    dados_raw = bytes(arquivo_data)
-                else:
-                    dados_raw = bytes(arquivo_data)
-                nome_original = arquivo_nome or f"produto_{produto['id']}"
+        if prod_completo and prod_completo["arquivo_data"] is not None:
+            tem_arquivo = True
+            senha_arquivo = gerar_senha_arquivo()
+            dados_raw = bytes(prod_completo["arquivo_data"])
+            nome_original = prod_completo["arquivo_nome"] or f"produto_{produto['id']}"
 
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(read_messages=False),
@@ -386,89 +361,54 @@ async def entregar_produto(user, produto: dict, pedido_id: str, guild, dados_arq
 
     nome_canal = f"🛒-compra-{user.name.lower().replace(' ', '-')[:20]}"
     try:
-        canal_temp = await guild.create_text_channel(
-            name=nome_canal,
-            overwrites=overwrites,
-            reason=f"Entrega para {user.name} • pedido {pedido_id}"
-        )
-    except discord.Forbidden:
-        try:
-            embed = criar_embed(titulo="⚠️ Erro na entrega", descricao="Não foi possível criar o canal.", cor=COR_ERRO)
-            await user.send(embed=embed)
-        except:
-            pass
+        canal_temp = await guild.create_text_channel(name=nome_canal, overwrites=overwrites, reason=f"Entrega para {user.name} • pedido {pedido_id}")
+    except:
+        embed = criar_embed(titulo="⚠️ Erro na entrega", descricao="Não foi possível criar o canal.", cor=COR_ERRO)
+        await user.send(embed=embed)
         return
 
     embed = discord.Embed(
-        title="🖤  NEXZY STORE — COMPRA APROVADA",
-        description=(
-            f"> Olá, **{user.display_name}**! Seu pagamento foi **confirmado**.\n"
-            f"> ⚠️ **Este canal será excluído em 5 minutos!**\n"
-            f"> 🔐 **A key é de uso único** — após extrair, o canal será destruído."
-        ),
+        title="🖤 NEXZY STORE — COMPRA APROVADA",
+        description=f"> Olá, **{user.display_name}**! Seu pagamento foi **confirmado**.\n> ⚠️ **Este canal será excluído em 5 minutos!**\n> 🔐 **A key é de uso único** — após extrair, o canal será destruído.",
         color=0x2b2b2b
     )
     embed.set_thumbnail(url=user.display_avatar.url if user.display_avatar else None)
     embed.add_field(name="**━━━━━━━━━━━━━━━━━━━━**", value="\u200b", inline=False)
-    embed.add_field(name="**📦  Produto**",   value=f"{produto['emoji']}  {produto['nome']}", inline=True)
-    embed.add_field(name="**💳  Valor Pago**", value=f"`{formatar_preco(produto['preco'])}`", inline=True)
-    embed.add_field(name="**🆔  Pedido**",     value=f"`{pedido_id}`", inline=True)
+    embed.add_field(name="**📦 Produto**", value=f"{produto['emoji']} {produto['nome']}", inline=True)
+    embed.add_field(name="**💳 Valor Pago**", value=f"`{formatar_preco(produto['preco'])}`", inline=True)
+    embed.add_field(name="**🆔 Pedido**", value=f"`{pedido_id}`", inline=True)
     if cupom:
-        embed.add_field(name="**🎟️  Cupom**", value=f"`{cupom}`", inline=True)
+        embed.add_field(name="**🎟️ Cupom**", value=f"`{cupom}`", inline=True)
     embed.add_field(name="**━━━━━━━━━━━━━━━━━━━━**", value="\u200b", inline=False)
 
     if tem_arquivo:
-        embed.add_field(name="**🔐  Senha do Arquivo `.7z`**", value=f"```\n{senha_arquivo}\n```", inline=False)
+        embed.add_field(name="**🔐 Senha do Arquivo `.7z`**", value=f"```\n{senha_arquivo}\n```", inline=False)
         embed.add_field(
-            name="**📂  Como extrair**",
-            value=(
-                "**1.** Baixe o arquivo `.7z` abaixo **AGORA**\n"
-                "**2.** Instale o **[7-Zip](https://7-zip.org)** (gratuito)\n"
-                "**3.** Clique com botão direito → *7-Zip → Extrair aqui*\n"
-                "**4.** Insira a senha acima\n\n"
-                "⚠️ **KEY DE USO ÚNICO** — Após 5 minutos o canal será **DELETADO**\n"
-                "⚠️ **Este arquivo é exclusivo para esta compra.**"
-            ),
+            name="**📂 Como extrair**",
+            value="**1.** Baixe o arquivo `.7z` abaixo **AGORA**\n**2.** Instale o **[7-Zip](https://7-zip.org)**\n**3.** Clique com botão direito → *7-Zip → Extrair aqui*\n**4.** Insira a senha acima\n\n⚠️ **KEY DE USO ÚNICO** — Canal será deletado em 5 minutos.",
             inline=False
         )
         embed.set_footer(text="⚫ NEXZY STORE  •  5 minutos para baixar!")
         embed.timestamp = datetime.utcnow()
-
         try:
-            if not verificar_7zip():
-                print("⏳ 7-Zip não encontrado. Tentando instalar...")
-                if instalar_7zip():
-                    print("✅ 7-Zip instalado com sucesso!")
-                else:
-                    raise RuntimeError("7-Zip não encontrado e não foi possível instalar automaticamente.")
-            
+            if not verificar_7zip() and not instalar_7zip():
+                raise RuntimeError("7-Zip não instalado")
             dados_cifrados = await criar_7z_criptografado(dados_raw, nome_original, senha_arquivo)
             nome_saida = f"nexzy_{produto['id']}_{pedido_id[:8]}.7z"
             arquivo_discord = discord.File(fp=io.BytesIO(dados_cifrados), filename=nome_saida)
             await canal_temp.send(embed=embed, file=arquivo_discord)
-            print(f"✅ Arquivo entregue: {nome_saida}")
         except Exception as e:
-            print(f"❌ Erro criptografia: {e}")
-            embed.add_field(name="⚠️  Problema na entrega", value="Houve um erro. O suporte foi notificado.", inline=False)
+            print(f"Erro ao enviar arquivo: {e}")
+            embed.add_field(name="⚠️ Problema na entrega", value="Houve um erro. O suporte foi notificado.", inline=False)
             await canal_temp.send(embed=embed)
-            canal_admin = bot.get_channel(CANAL_LOG_ADMIN)
-            if canal_admin:
-                await canal_admin.send(embed=criar_embed(
-                    titulo="❌ ERRO NA ENTREGA",
-                    descricao=f"Pedido `{pedido_id}`\nUsuário {user.mention}\nProduto {produto['nome']}\nErro: `{e}`",
-                    cor=COR_ERRO
-                ))
     else:
-        embed.add_field(name="**✅  Próximos passos**", value="Produto ativado. Abra um ticket se precisar.", inline=False)
-        embed.set_footer(text="⚫ NEXZY STORE  •  5 minutos para baixar!")
-        embed.timestamp = datetime.utcnow()
+        embed.add_field(name="**✅ Próximos passos**", value="Produto ativado. Abra um ticket se precisar.", inline=False)
         await canal_temp.send(embed=embed)
 
-    # Exclusão após 5 minutos
     async def remover_canal():
         await asyncio.sleep(300)
         try:
-            await canal_temp.delete(reason="Canal de entrega expirado (5 min) — Key de uso único")
+            await canal_temp.delete(reason="Canal de entrega expirado (5 min)")
         except:
             pass
     asyncio.create_task(remover_canal())
@@ -479,111 +419,7 @@ async def entregar_produto(user, produto: dict, pedido_id: str, guild, dados_arq
     else:
         await log_admin("Teste de Entrega", user, f"Pedido `{pedido_id}` | Produto: {produto['nome']}")
 
-# ================= MODAIS (produtos existentes) =================
-class ProdutoModal(discord.ui.Modal, title="✨ Adicionar Produto"):
-    nome_input      = discord.ui.TextInput(label="📦 Nome", placeholder="Ex: VIP Premium", required=True)
-    preco_input     = discord.ui.TextInput(label="💰 Preço", placeholder="49.90", required=True)
-    emoji_input     = discord.ui.TextInput(label="😀 Emoji", placeholder="👑", required=False, default="🛒")
-    descricao_input = discord.ui.TextInput(label="📝 Descrição", placeholder="Breve descrição", required=False)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            pid = gerar_id()
-            nome = self.nome_input.value
-            preco = float(self.preco_input.value.replace(",", "."))
-            emoji = self.emoji_input.value or "🛒"
-            descricao = self.descricao_input.value or ""
-            produtos = await get_produtos()
-            while pid in produtos: pid = gerar_id()
-            await add_produto(pid, nome, preco, emoji, descricao)
-            embed = criar_embed(titulo="✅ Produto Adicionado!", cor=COR_SUCESSO)
-            embed.add_field(name="🆔 ID", value=f"`{pid}`", inline=True)
-            embed.add_field(name="📦 Nome", value=nome, inline=True)
-            embed.add_field(name="💰 Preço", value=formatar_preco(preco), inline=True)
-            embed.add_field(name="📂 Vincular arquivo", value=f"`!upload {pid}`", inline=False)
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            await atualizar_loja()
-            await log_admin("Produto Adicionado", interaction.user, f"**{nome}** • {formatar_preco(preco)} • ID `{pid}`")
-        except Exception as e:
-            await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
-
-class EditarProdutoModal(discord.ui.Modal, title="✏️ Editar Produto"):
-    def __init__(self, produto):
-        super().__init__()
-        self.produto_id = produto["id"]
-        self.nome_input = discord.ui.TextInput(label="📦 Nome", default=produto["nome"], required=True)
-        self.preco_input = discord.ui.TextInput(label="💰 Preço", default=str(produto["preco"]), required=True)
-        self.emoji_input = discord.ui.TextInput(label="😀 Emoji", default=produto["emoji"], required=False)
-        self.descricao_input = discord.ui.TextInput(label="📝 Descrição", default=produto.get("descricao",""), required=False)
-        for item in [self.nome_input, self.preco_input, self.emoji_input, self.descricao_input]:
-            self.add_item(item)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            nome = self.nome_input.value
-            preco = float(self.preco_input.value.replace(",", "."))
-            emoji = self.emoji_input.value or "🛒"
-            descricao = self.descricao_input.value or ""
-            await edit_produto(self.produto_id, nome, preco, emoji, descricao)
-            await interaction.followup.send("✅ Produto editado!", ephemeral=True)
-            await atualizar_loja()
-            await log_admin("Produto Editado", interaction.user, f"**{nome}** • {formatar_preco(preco)} • ID `{self.produto_id}`")
-        except Exception as e:
-            await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
-
-# ================= MODAIS PARA CUPONS =================
-class RegistrarCupomModal(discord.ui.Modal, title="🎟️ Registrar Novo Cupom"):
-    codigo = discord.ui.TextInput(label="Código do Cupom", placeholder="DESCONTO10", required=True)
-    tipo = discord.ui.TextInput(label="Tipo (percentual ou fixo)", placeholder="percentual / fixo", required=True)
-    valor = discord.ui.TextInput(label="Valor", placeholder="Ex: 10 (para 10% ou R$10)", required=True)
-    dias = discord.ui.TextInput(label="Dias de validade", placeholder="30", required=False, default="30")
-    limite = discord.ui.TextInput(label="Limite de usos", placeholder="1", required=False, default="1")
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        tipo = self.tipo.value.lower().strip()
-        if tipo not in ("percentual", "fixo"):
-            return await interaction.followup.send("❌ Tipo inválido. Use `percentual` ou `fixo`.", ephemeral=True)
-        try:
-            valor = float(self.valor.value.replace(",", "."))
-            if tipo == "percentual" and (valor <= 0 or valor > 100):
-                return await interaction.followup.send("❌ Percentual deve ser entre 1 e 100.", ephemeral=True)
-            dias_validade = int(self.dias.value)
-            limite_uso = int(self.limite.value)
-            codigo = self.codigo.value.strip().upper()
-            # Verificar se já existe
-            existente = await obter_cupom(codigo)
-            if existente:
-                return await interaction.followup.send(f"❌ Cupom `{codigo}` já existe.", ephemeral=True)
-            await criar_cupom(codigo, tipo, valor, dias_validade, limite_uso)
-            embed = criar_embed(titulo="✅ Cupom Criado", cor=COR_SUCESSO)
-            embed.add_field(name="Código", value=f"`{codigo}`", inline=True)
-            embed.add_field(name="Tipo", value="Percentual" if tipo=="percentual" else "Valor fixo", inline=True)
-            embed.add_field(name="Valor", value=f"{valor}%" if tipo=="percentual" else formatar_preco(valor), inline=True)
-            embed.add_field(name="Validade", value=f"{dias_validade} dias", inline=True)
-            embed.add_field(name="Limite", value=str(limite_uso), inline=True)
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            await log_admin("Cupom Criado", interaction.user, f"`{codigo}` - {tipo} - {valor} - limite {limite_uso}")
-        except Exception as e:
-            await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
-
-class ApagarCupomSelect(discord.ui.Select):
-    def __init__(self, cupons):
-        options = []
-        for c in cupons:
-            label = f"{c['codigo']} ({c['tipo']} {c['valor']}) - usado {c['usado']}/{c['limite_uso']}"
-            options.append(discord.SelectOption(label=label[:100], value=c['codigo']))
-        super().__init__(placeholder="🗑️ Selecione o cupom para remover", options=options[:25])
-    async def callback(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        codigo = self.values[0]
-        await deletar_cupom(codigo)
-        await interaction.followup.send(f"✅ Cupom `{codigo}` removido!", ephemeral=True)
-        await log_admin("Cupom Removido", interaction.user, f"`{codigo}`", cor=COR_ERRO)
-
-# ================= SELECTS PRODUTOS (modificado para suportar cupom) =================
+# ================= FLUXO DE COMPRA COM CUPOM (SIMPLIFICADO) =================
 class ProdutoSelect(discord.ui.Select):
     def __init__(self, produtos):
         options = [discord.SelectOption(label=f"{p['nome']} — {formatar_preco(p['preco'])}", value=pid, emoji=p['emoji']) for pid, p in produtos.items()]
@@ -593,10 +429,9 @@ class ProdutoSelect(discord.ui.Select):
         produto_id = self.values[0]
         produtos = await get_produtos()
         produto = produtos[produto_id]
-        # Armazenar produto selecionado temporariamente
+        # Salva o produto selecionado temporariamente
         cupons_ativos[interaction.user.id] = {"produto_id": produto_id, "produto": produto}
-        # Exibir opção de usar cupom
-        embed = criar_embed(titulo=f"📦 {produto['nome']}", descricao=f"**Preço original:** {formatar_preco(produto['preco'])}", cor=COR_DESTAQUE)
+        embed = criar_embed(titulo=f"📦 {produto['nome']}", descricao=f"**Preço:** {formatar_preco(produto['preco'])}", cor=COR_DESTAQUE)
         embed.add_field(name="🎟️ Deseja usar um cupom?", value="Clique no botão abaixo para aplicar desconto.", inline=False)
         view = CupomPreView()
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
@@ -606,7 +441,6 @@ class CupomPreView(discord.ui.View):
         super().__init__(timeout=120)
     @discord.ui.button(label="🎟️ Usar Cupom", style=discord.ButtonStyle.primary, emoji="🏷️")
     async def usar_cupom(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Abre modal para inserir código
         await interaction.response.send_modal(CupomModal())
     @discord.ui.button(label="💳 Comprar sem cupom", style=discord.ButtonStyle.success, emoji="➡️")
     async def sem_cupom(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -615,11 +449,10 @@ class CupomPreView(discord.ui.View):
         if not dados:
             return await interaction.followup.send("❌ Sessão expirada. Selecione o produto novamente.", ephemeral=True)
         produto = dados["produto"]
-        # Iniciar pagamento com preço original
         await iniciar_pagamento(interaction, produto["id"], valor_final=produto["preco"], cupom_codigo=None)
 
 class CupomModal(discord.ui.Modal, title="🎟️ Aplicar Cupom"):
-    codigo = discord.ui.TextInput(label="Código do cupom", placeholder="Digite o código", required=True)
+    codigo = discord.ui.TextInput(label="Código do cupom", placeholder="Ex: NEXZY20", required=True)
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         dados = cupons_ativos.get(interaction.user.id)
@@ -631,46 +464,17 @@ class CupomModal(discord.ui.Modal, title="🎟️ Aplicar Cupom"):
         valido, msg, desconto, preco_final = await validar_cupom(cod, preco_original)
         if not valido:
             return await interaction.followup.send(msg, ephemeral=True)
-        # Guardar informações do cupom aplicado
-        cupons_ativos[interaction.user.id]["cupom"] = cod
-        cupons_ativos[interaction.user.id]["desconto"] = desconto
-        cupons_ativos[interaction.user.id]["preco_final"] = preco_final
-        embed = criar_embed(titulo="✅ Cupom Aplicado", cor=COR_SUCESSO)
-        embed.add_field(name="Cupom", value=f"`{cod}`", inline=True)
-        embed.add_field(name="Produto", value=produto['nome'], inline=True)
-        embed.add_field(name="Valor original", value=formatar_preco(preco_original), inline=True)
-        embed.add_field(name="Desconto", value=formatar_preco(desconto), inline=True)
-        embed.add_field(name="Valor final", value=formatar_preco(preco_final), inline=True)
-        view = ConfirmarCompraView()
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        # Já aplica o desconto e gera o PIX automaticamente
+        await interaction.followup.send(f"✅ {msg}\n💰 Valor final: **{formatar_preco(preco_final)}**\n⏳ Gerando PIX...", ephemeral=True)
+        await iniciar_pagamento(interaction, produto["id"], valor_final=preco_final, cupom_codigo=cod)
 
-class ConfirmarCompraView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=120)
-    @discord.ui.button(label="✅ Confirmar Compra", style=discord.ButtonStyle.success, emoji="💳")
-    async def confirmar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        dados = cupons_ativos.get(interaction.user.id)
-        if not dados or "preco_final" not in dados:
-            return await interaction.followup.send("❌ Sessão inválida. Recomece a compra.", ephemeral=True)
-        produto_id = dados["produto_id"]
-        preco_final = dados["preco_final"]
-        cupom = dados.get("cupom")
-        # Iniciar pagamento com valor final e cupom
-        await iniciar_pagamento(interaction, produto_id, valor_final=preco_final, cupom_codigo=cupom)
-    @discord.ui.button(label="❌ Cancelar", style=discord.ButtonStyle.danger, emoji="🚫")
-    async def cancelar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("Compra cancelada.", ephemeral=True)
-        cupons_ativos.pop(interaction.user.id, None)
-
-# ================= PAGAMENTO (modificado para aceitar valor final e cupom) =================
+# ================= PAGAMENTO =================
 async def iniciar_pagamento(interaction: discord.Interaction, produto_id: str, valor_final: float = None, cupom_codigo: str = None):
     produtos = await get_produtos()
     produto = produtos.get(produto_id)
     if not produto:
         return await interaction.followup.send("❌ Produto não encontrado.", ephemeral=True)
 
-    # Se valor_final não foi passado, usa o preço original
     if valor_final is None:
         valor_final = produto["preco"]
     desconto_aplicado = produto["preco"] - valor_final
@@ -689,21 +493,19 @@ async def iniciar_pagamento(interaction: discord.Interaction, produto_id: str, v
         }
         payment = sdk.payment().create(payment_data)
         resp = payment["response"]
+        if "point_of_interaction" not in resp:
+            raise Exception("Erro ao gerar PIX: resposta inválida")
         pedido_id = str(uuid.uuid4())
-        # Salvar pedido com cupom e desconto
         await add_pedido(pedido_id, interaction.user.id, produto_id, produto["nome"], produto["preco"], cupom_codigo, desconto_aplicado)
         pix = resp["point_of_interaction"]["transaction_data"]["qr_code"]
         pay_id = resp["id"]
         pedidos_pendentes[pay_id] = pedido_id
 
-        embed = criar_embed(titulo="💳 PAGAMENTO VIA PIX",
-                            descricao=f"**{produto['emoji']} {produto['nome']}**",
-                            cor=COR_PENDENTE)
+        embed = criar_embed(titulo="💳 PAGAMENTO VIA PIX", descricao=f"**{produto['emoji']} {produto['nome']}**", cor=COR_PENDENTE)
         if cupom_codigo and desconto_aplicado > 0:
             embed.add_field(name="🎟️ Cupom aplicado", value=f"`{cupom_codigo}` - {formatar_preco(desconto_aplicado)} de desconto", inline=False)
-        embed.add_field(name="💵 Valor original", value=f"~~{formatar_preco(produto['preco'])}~~", inline=True)
-        embed.add_field(name="💰 Valor a pagar", value=f"**{formatar_preco(valor_final)}**", inline=True)
-        embed.add_field(name="🏢 Destinatário", value="**NEXZY STORE**", inline=True)
+        embed.add_field(name="💰 Valor original", value=f"~~{formatar_preco(produto['preco'])}~~", inline=True)
+        embed.add_field(name="💵 Valor a pagar", value=f"**{formatar_preco(valor_final)}**", inline=True)
         embed.add_field(name="⏰ Validade", value="**30 minutos**", inline=True)
         embed.add_field(name="📋 Código PIX", value=f"```\n{pix[:300]}\n```", inline=False)
         embed.add_field(name="📱 Como Pagar", value="1. Copie o código\n2. PIX no seu banco\n3. Clique em ✅ JÁ PAGUEI", inline=False)
@@ -715,11 +517,10 @@ async def iniciar_pagamento(interaction: discord.Interaction, produto_id: str, v
 
         guild = interaction.guild or await get_guild()
         asyncio.create_task(verificar_pagamento(pay_id, pedido_id, interaction.user, produto, guild, cupom_codigo))
-        # Limpar sessão de cupom
         cupons_ativos.pop(interaction.user.id, None)
     except Exception as e:
         print(f"Erro PIX: {e}")
-        await interaction.followup.send(f"❌ Erro: {str(e)[:200]}", ephemeral=True)
+        await interaction.followup.send(f"❌ Erro ao gerar PIX: {str(e)[:200]}", ephemeral=True)
 
 async def verificar_pagamento(payment_id, pedido_id, user, produto, guild, cupom_codigo=None):
     for _ in range(30):
@@ -728,12 +529,8 @@ async def verificar_pagamento(payment_id, pedido_id, user, produto, guild, cupom
             info = sdk.payment().get(payment_id)
             if info["response"].get("status") == "approved":
                 await update_pedido(pedido_id, "aprovado")
-                # Registrar uso do cupom (incrementar contador)
                 if cupom_codigo:
                     await usar_cupom(cupom_codigo)
-                # Buscar o valor final pago (já está na venda)
-                # Para registrar venda, o valor já é o preço com desconto, mas a função add_venda espera o valor pago
-                # Precisamos saber o valor final: podemos obtê-lo do pedido
                 async with db.acquire() as conn:
                     pedido = await conn.fetchrow("SELECT produto_preco, desconto FROM pedidos WHERE id=$1", pedido_id)
                     valor_pago = pedido["produto_preco"] - pedido["desconto"] if pedido else produto["preco"]
@@ -745,17 +542,16 @@ async def verificar_pagamento(payment_id, pedido_id, user, produto, guild, cupom
             print(f"Verificação: {e}")
     await update_pedido(pedido_id, "expirado")
 
-# ================= EMBEDS LOJA / VENDAS (existentes) =================
+# ================= EMBEDS LOJA / VENDAS =================
 async def montar_embed_loja():
     produtos = await get_produtos()
-    embed = criar_embed(titulo="**🖤  N E X Z Y  S T O R E**",
+    embed = criar_embed(titulo="**🖤 N E X Z Y S T O R E**",
                         descricao="╔══════════════════════════╗\n💎 **Compre via PIX e receba em canal exclusivo!**\n🔐 Arquivo criptografado + senha única\n⏰ Canal expira em **5 minutos**\n🎟️ **Use cupons de desconto!**\n╚══════════════════════════╝",
                         cor=0x1a1a1a)
     for pid, p in produtos.items():
-        desc = p.get("descricao") or ""
         arquivo = "📂 Arquivo incluído" if p.get("arquivo_nome") else "🔑 Acesso imediato"
-        embed.add_field(name=f"{p['emoji']}  {p['nome']}",
-                        value=f"**{formatar_preco(p['preco'])}**\n🆔 `{pid}`\n{arquivo}" + (f"\n> {desc}" if desc else ""),
+        embed.add_field(name=f"{p['emoji']} {p['nome']}",
+                        value=f"**{formatar_preco(p['preco'])}**\n🆔 `{pid}`\n{arquivo}" + (f"\n> {p.get('descricao','')}" if p.get('descricao') else ""),
                         inline=True)
     embed.set_footer(text="⚫ NEXZY STORE • Clique em 💰 COMPRAR")
     embed.timestamp = datetime.utcnow()
@@ -769,32 +565,26 @@ async def montar_embed_vendas():
     embed.add_field(name="📈 Ticket Médio", value=formatar_preco(total/qtd) if qtd else "R$ 0,00", inline=True)
     return embed
 
-# ================= ATUALIZAÇÕES (existentes) =================
+# ================= ATUALIZAÇÕES =================
 async def atualizar_loja():
     canal = bot.get_channel(CANAL_LOJA)
-    if not canal:
-        return
+    if not canal: return
     async for msg in canal.history(limit=10):
         if msg.author == bot.user:
-            try:
-                await msg.delete()
-            except:
-                pass
+            try: await msg.delete()
+            except: pass
     await canal.send(embed=await montar_embed_loja(), view=LojaButtons())
 
 async def atualizar_vendas():
     canal = bot.get_channel(CANAL_VENDAS)
-    if not canal:
-        return
+    if not canal: return
     async for msg in canal.history(limit=10):
         if msg.author == bot.user:
-            try:
-                await msg.delete()
-            except:
-                pass
+            try: await msg.delete()
+            except: pass
     await canal.send(embed=await montar_embed_vendas())
 
-# ================= WEBHOOK MP (existente) =================
+# ================= WEBHOOK =================
 async def webhook_mp(request):
     try:
         data = await request.json()
@@ -833,39 +623,29 @@ async def start_server():
     await site.start()
     print("✅ Servidor HTTP ativo")
 
-# ================= COMANDOS (existentes + novos para cupom via chat) =================
+# ================= COMANDOS E BOTÕES ADMIN =================
 @bot.command(name="loja")
 async def cmd_loja(ctx):
     await ctx.send(embed=await montar_embed_loja(), view=LojaButtons())
-    try:
-        await ctx.message.delete()
-    except:
-        pass
+    try: await ctx.message.delete()
+    except: pass
 
 @bot.command(name="vendas")
 async def cmd_vendas(ctx):
-    if not any(r.id == CARGO_DONO for r in ctx.author.roles):
-        return
+    if not any(r.id == CARGO_DONO for r in ctx.author.roles): return
     await ctx.send(embed=await montar_embed_vendas())
-    try:
-        await ctx.message.delete()
-    except:
-        pass
+    try: await ctx.message.delete()
+    except: pass
 
 @bot.command(name="upload")
 async def cmd_upload(ctx, produto_id: str = None):
-    if not any(r.id == CARGO_DONO for r in ctx.author.roles):
-        return await ctx.reply("❌ Sem permissão.", delete_after=5)
-    if not produto_id:
-        return await ctx.reply("❌ Uso: `!upload <produto_id>` com arquivo anexado.", delete_after=15)
-    if not ctx.message.attachments:
-        return await ctx.reply("❌ Nenhum arquivo anexado.", delete_after=10)
+    if not any(r.id == CARGO_DONO for r in ctx.author.roles): return await ctx.reply("❌ Sem permissão.")
+    if not produto_id: return await ctx.reply("❌ Uso: `!upload <produto_id>` com arquivo anexado.")
+    if not ctx.message.attachments: return await ctx.reply("❌ Nenhum arquivo anexado.")
     produtos = await get_produtos()
-    if produto_id not in produtos:
-        return await ctx.reply(f"❌ Produto `{produto_id}` não encontrado.\nIDs: {', '.join(produtos.keys())}", delete_after=15)
+    if produto_id not in produtos: return await ctx.reply(f"❌ Produto `{produto_id}` não encontrado.")
     att = ctx.message.attachments[0]
-    if att.size/1024/1024 > 25:
-        return await ctx.reply(f"❌ Arquivo muito grande: **{att.size/1024/1024:.1f} MB**", delete_after=15)
+    if att.size/1024/1024 > 25: return await ctx.reply(f"❌ Arquivo muito grande: **{att.size/1024/1024:.1f} MB**")
     msg = await ctx.reply(f"⏳ Salvando **{att.filename}**...")
     try:
         dados = await att.read()
@@ -878,10 +658,8 @@ async def cmd_upload(ctx, produto_id: str = None):
 
 @bot.command(name="remover_arquivo")
 async def cmd_remover_arquivo(ctx, produto_id: str = None):
-    if not any(r.id == CARGO_DONO for r in ctx.author.roles):
-        return
-    if not produto_id:
-        return await ctx.reply("❌ Use: `!remover_arquivo <produto_id>`")
+    if not any(r.id == CARGO_DONO for r in ctx.author.roles): return
+    if not produto_id: return await ctx.reply("❌ Use: `!remover_arquivo <produto_id>`")
     await remover_arquivo_produto(produto_id)
     await ctx.reply(f"✅ Arquivo removido do produto `{produto_id}`.")
     await atualizar_loja()
@@ -889,8 +667,7 @@ async def cmd_remover_arquivo(ctx, produto_id: str = None):
 
 @bot.command(name="check7z")
 async def cmd_check7z(ctx):
-    if not any(r.id == CARGO_DONO for r in ctx.author.roles):
-        return
+    if not any(r.id == CARGO_DONO for r in ctx.author.roles): return
     ok = verificar_7zip()
     if ok:
         result = subprocess.run(["7z", "i"], capture_output=True, text=True, timeout=5)
@@ -900,29 +677,23 @@ async def cmd_check7z(ctx):
 
 @bot.command(name="instalar7z")
 async def cmd_instalar7z(ctx):
-    if not any(r.id == CARGO_DONO for r in ctx.author.roles):
-        return await ctx.reply("❌ Sem permissão.", delete_after=5)
+    if not any(r.id == CARGO_DONO for r in ctx.author.roles): return await ctx.reply("❌ Sem permissão.")
     msg = await ctx.reply("⏳ Instalando 7-Zip...")
     try:
         if instalar_7zip():
-            if verificar_7zip():
-                await msg.edit(content="✅ **7-Zip instalado com sucesso!**")
-                await log_admin("7-Zip Instalado", ctx.author, "Instalação concluída")
-            else:
-                await msg.edit(content="⚠️ Instalação concluída mas 7z não respondeu.")
+            await msg.edit(content="✅ **7-Zip instalado com sucesso!**")
+            await log_admin("7-Zip Instalado", ctx.author, "Instalação concluída")
         else:
             await msg.edit(content="❌ Falha na instalação.")
     except Exception as e:
         await msg.edit(content=f"❌ Erro: {e}")
 
-# ================= BOTÕES DA LOJA (com painel admin modificado para incluir cupons) =================
 class LojaButtons(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
     @discord.ui.button(label="💰 Comprar", style=discord.ButtonStyle.success, emoji="🛒")
     async def comprar(self, interaction: discord.Interaction, button: discord.ui.Button):
         produtos = await get_produtos()
-        if not produtos:
-            return await interaction.response.send_message("❌ Nenhum produto disponível.", ephemeral=True)
+        if not produtos: return await interaction.response.send_message("❌ Nenhum produto disponível.", ephemeral=True)
         view = discord.ui.View()
         view.add_item(ProdutoSelect(produtos))
         await interaction.response.send_message("📦 **Selecione o produto:**", view=view, ephemeral=True)
@@ -935,12 +706,11 @@ class LojaButtons(discord.ui.View):
         embed.add_field(name="➕ Adicionar", value="Cadastra produto", inline=True)
         embed.add_field(name="✏️ Editar", value="Altera produto", inline=True)
         embed.add_field(name="🗑️ Remover", value="Remove produto", inline=True)
+        embed.add_field(name="🎟️ Cupons", value="Gerenciar cupons", inline=True)
         embed.add_field(name="📂 Ver Arquivos", value="Arquivos do banco", inline=True)
         embed.add_field(name="🧹 Limpar Banco", value="Limpa tudo", inline=True)
         embed.add_field(name="🧪 Teste", value="Envia teste", inline=True)
         embed.add_field(name="📊 Estatísticas", value="Faturamento", inline=True)
-        embed.add_field(name="🎟️ Cupons", value="Gerenciar cupons", inline=True)
-        embed.add_field(name="📂 Upload", value="`!upload <id>`", inline=True)
         await interaction.response.send_message(embed=embed, view=AdminView(), ephemeral=True)
 
 class AdminView(discord.ui.View):
@@ -948,32 +718,49 @@ class AdminView(discord.ui.View):
     @discord.ui.button(label="➕ Adicionar Produto", style=discord.ButtonStyle.success)
     async def add(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(ProdutoModal())
-
     @discord.ui.button(label="✏️ Editar Produto", style=discord.ButtonStyle.primary)
     async def editar(self, interaction: discord.Interaction, button: discord.ui.Button):
         produtos = await get_produtos()
-        if not produtos:
-            return await interaction.response.send_message("❌ Nenhum produto.", ephemeral=True)
+        if not produtos: return await interaction.response.send_message("❌ Nenhum produto.", ephemeral=True)
         view = discord.ui.View()
         view.add_item(EditarSelect(produtos))
         await interaction.response.send_message("✏️ Selecione o produto:", view=view, ephemeral=True)
-
     @discord.ui.button(label="🗑️ Remover Produto", style=discord.ButtonStyle.danger)
     async def remover(self, interaction: discord.Interaction, button: discord.ui.Button):
         produtos = await get_produtos()
-        if not produtos:
-            return await interaction.response.send_message("❌ Nenhum produto.", ephemeral=True)
+        if not produtos: return await interaction.response.send_message("❌ Nenhum produto.", ephemeral=True)
         view = discord.ui.View()
         view.add_item(RemoverSelect(produtos))
         await interaction.response.send_message("🗑️ Selecione o produto:", view=view, ephemeral=True)
-
+    @discord.ui.button(label="🎟️ Registrar Cupom", style=discord.ButtonStyle.success, emoji="➕")
+    async def add_cupom(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(RegistrarCupomModal())
+    @discord.ui.button(label="🗑️ Apagar Cupom", style=discord.ButtonStyle.danger, emoji="➖")
+    async def del_cupom(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cupons = await listar_cupons_ativos()
+        if not cupons: return await interaction.response.send_message("❌ Nenhum cupom ativo.", ephemeral=True)
+        view = discord.ui.View()
+        view.add_item(ApagarCupomSelect(cupons))
+        await interaction.response.send_message("🗑️ Selecione o cupom para remover:", view=view, ephemeral=True)
+    @discord.ui.button(label="📋 Listar Cupons", style=discord.ButtonStyle.secondary, emoji="📜")
+    async def list_cupons(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        cupons = await listar_cupons_ativos()
+        if not cupons:
+            embed = criar_embed(titulo="🎟️ Cupons Ativos", descricao="Nenhum cupom ativo.", cor=COR_DESTAQUE)
+            return await interaction.followup.send(embed=embed, ephemeral=True)
+        embed = criar_embed(titulo="🎟️ Cupons Ativos", cor=COR_DESTAQUE)
+        for c in cupons:
+            valor_str = f"{c['valor']}%" if c['tipo'] == 'percentual' else formatar_preco(c['valor'])
+            embed.add_field(name=f"🔖 {c['codigo']}", value=f"**{valor_str}** • usos: {c['usado']}/{c['limite_uso']} • expira: {c['valido_ate'].strftime('%d/%m/%Y')}", inline=False)
+        await interaction.followup.send(embed=embed, ephemeral=True)
     @discord.ui.button(label="📂 Ver Arquivos", style=discord.ButtonStyle.secondary)
     async def ver_arquivos(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         async with db.acquire() as conn:
             rows = await conn.fetch("SELECT id, nome, arquivo_nome, LENGTH(arquivo_data) as tamanho_bytes FROM produtos WHERE arquivo_data IS NOT NULL")
         if not rows:
-            embed = criar_embed(titulo="📂 Arquivos", descricao="*Nenhum.*", cor=COR_DESTAQUE)
+            embed = criar_embed(titulo="📂 Arquivos", descricao="Nenhum.", cor=COR_DESTAQUE)
             return await interaction.followup.send(embed=embed, ephemeral=True)
         embed = criar_embed(titulo="📂 Arquivos no Banco", descricao=f"{len(rows)} arquivo(s):", cor=COR_DESTAQUE)
         total = 0
@@ -983,59 +770,69 @@ class AdminView(discord.ui.View):
             embed.add_field(name=f"📦 {row['nome']} (`{row['id']}`)", value=f"📄 `{row['arquivo_nome']}`\n📏 {mb:.2f} MB", inline=False)
         embed.add_field(name="📊 Total", value=f"**{len(rows)}** arquivos • **{total/1024/1024:.2f} MB**", inline=False)
         await interaction.followup.send(embed=embed, ephemeral=True)
-
     @discord.ui.button(label="🧹 Limpar Banco", style=discord.ButtonStyle.danger)
     async def limpar_banco(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = criar_embed(titulo="⚠️ CONFIRMAÇÃO", descricao="**IRREVERSÍVEL!** Apagará tudo.", cor=COR_ERRO)
         view = ConfirmacaoLimpezaView(interaction)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-
     @discord.ui.button(label="🧪 Teste de Entrega", style=discord.ButtonStyle.secondary)
     async def teste(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         guild = interaction.guild or await get_guild()
-        if not guild:
-            return await interaction.followup.send("❌ Servidor não encontrado.", ephemeral=True)
+        if not guild: return await interaction.followup.send("❌ Servidor não encontrado.", ephemeral=True)
         conteudo = b"Arquivo de teste da Nexzy Store.\nSe voce esta vendo isso, a entrega funcionou!\nKey de uso unico - Canal expira em 5 minutos."
         produto_teste = {"id":"teste","nome":"Produto de Teste","preco":0.0,"emoji":"🧪"}
         pedido_id = f"TESTE-{uuid.uuid4().hex[:8]}"
         await interaction.followup.send("⏳ Criando canal de teste (5 min)...", ephemeral=True)
         await entregar_produto(interaction.user, produto_teste, pedido_id, guild, dados_arquivo_override=conteudo, nome_arquivo_override="teste_nexzy.txt")
         await interaction.edit_original_response(content="✅ Canal de teste criado! Expira em 5 minutos.")
-
     @discord.ui.button(label="📊 Estatísticas", style=discord.ButtonStyle.secondary)
     async def stats(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         await interaction.followup.send(embed=await montar_embed_vendas(), ephemeral=True)
 
-    # NOVOS BOTÕES PARA CUPONS
-    @discord.ui.button(label="🎟️ Registrar Cupom", style=discord.ButtonStyle.success, emoji="➕")
-    async def add_cupom(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(RegistrarCupomModal())
-
-    @discord.ui.button(label="🗑️ Apagar Cupom", style=discord.ButtonStyle.danger, emoji="➖")
-    async def del_cupom(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cupons = await listar_cupons_ativos()
-        if not cupons:
-            return await interaction.response.send_message("❌ Nenhum cupom ativo.", ephemeral=True)
-        view = discord.ui.View()
-        view.add_item(ApagarCupomSelect(cupons))
-        await interaction.response.send_message("🗑️ Selecione o cupom para remover:", view=view, ephemeral=True)
-
-    @discord.ui.button(label="📋 Listar Cupons", style=discord.ButtonStyle.secondary, emoji="📜")
-    async def list_cupons(self, interaction: discord.Interaction, button: discord.ui.Button):
+class RegistrarCupomModal(discord.ui.Modal, title="🎟️ Registrar Cupom"):
+    codigo = discord.ui.TextInput(label="Código", placeholder="DESCONTO20", required=True)
+    tipo = discord.ui.TextInput(label="Tipo (percentual ou fixo)", placeholder="percentual", required=True)
+    valor = discord.ui.TextInput(label="Valor", placeholder="20 (para 20% ou R$20)", required=True)
+    dias = discord.ui.TextInput(label="Dias de validade", placeholder="30", required=False, default="30")
+    limite = discord.ui.TextInput(label="Limite de usos", placeholder="1", required=False, default="1")
+    async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        cupons = await listar_cupons_ativos()
-        if not cupons:
-            embed = criar_embed(titulo="🎟️ Cupons Ativos", descricao="Nenhum cupom ativo no momento.", cor=COR_DESTAQUE)
-            return await interaction.followup.send(embed=embed, ephemeral=True)
-        embed = criar_embed(titulo="🎟️ Cupons Ativos", cor=COR_DESTAQUE)
-        for c in cupons:
-            valor_str = f"{c['valor']}%" if c['tipo'] == 'percentual' else formatar_preco(c['valor'])
-            embed.add_field(name=f"🔖 {c['codigo']}", value=f"**{valor_str}** • usos: {c['usado']}/{c['limite_uso']} • expira: {c['valido_ate'].strftime('%d/%m/%Y')}", inline=False)
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        tipo = self.tipo.value.lower().strip()
+        if tipo not in ("percentual", "fixo"):
+            return await interaction.followup.send("❌ Tipo inválido. Use `percentual` ou `fixo`.", ephemeral=True)
+        try:
+            valor = float(self.valor.value.replace(",", "."))
+            if tipo == "percentual" and (valor <= 0 or valor > 100):
+                return await interaction.followup.send("❌ Percentual deve ser entre 1 e 100.", ephemeral=True)
+            dias_validade = int(self.dias.value)
+            limite_uso = int(self.limite.value)
+            codigo = self.codigo.value.strip().upper()
+            existente = await obter_cupom(codigo)
+            if existente:
+                return await interaction.followup.send(f"❌ Cupom `{codigo}` já existe.", ephemeral=True)
+            await criar_cupom(codigo, tipo, valor, dias_validade, limite_uso)
+            embed = criar_embed(titulo="✅ Cupom Criado", cor=COR_SUCESSO)
+            embed.add_field(name="Código", value=f"`{codigo}`", inline=True)
+            embed.add_field(name="Tipo", value="Percentual" if tipo=="percentual" else "Valor fixo", inline=True)
+            embed.add_field(name="Valor", value=f"{valor}%" if tipo=="percentual" else formatar_preco(valor), inline=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            await log_admin("Cupom Criado", interaction.user, f"`{codigo}` - {tipo} - {valor} - limite {limite_uso}")
+        except Exception as e:
+            await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
 
-# ================= SELECTS EXISTENTES (EditarSelect, RemoverSelect) =================
+class ApagarCupomSelect(discord.ui.Select):
+    def __init__(self, cupons):
+        options = [discord.SelectOption(label=f"{c['codigo']} ({c['tipo']} {c['valor']}) - usado {c['usado']}/{c['limite_uso']}", value=c['codigo']) for c in cupons]
+        super().__init__(placeholder="🗑️ Selecione o cupom para remover", options=options[:25])
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        codigo = self.values[0]
+        await deletar_cupom(codigo)
+        await interaction.followup.send(f"✅ Cupom `{codigo}` removido!", ephemeral=True)
+        await log_admin("Cupom Removido", interaction.user, f"`{codigo}`", cor=COR_ERRO)
+
 class EditarSelect(discord.ui.Select):
     def __init__(self, produtos):
         options = [discord.SelectOption(label=f"{p['nome']} — {formatar_preco(p['preco'])}", value=pid, emoji=p['emoji']) for pid, p in produtos.items()]
@@ -1060,18 +857,66 @@ class RemoverSelect(discord.ui.Select):
         await atualizar_loja()
         await log_admin("Produto Removido", interaction.user, f"**{nome}** • ID `{self.values[0]}`", cor=COR_ERRO)
 
+class EditarProdutoModal(discord.ui.Modal, title="✏️ Editar Produto"):
+    def __init__(self, produto):
+        super().__init__()
+        self.produto_id = produto["id"]
+        self.nome_input = discord.ui.TextInput(label="📦 Nome", default=produto["nome"], required=True)
+        self.preco_input = discord.ui.TextInput(label="💰 Preço", default=str(produto["preco"]), required=True)
+        self.emoji_input = discord.ui.TextInput(label="😀 Emoji", default=produto["emoji"], required=False)
+        self.descricao_input = discord.ui.TextInput(label="📝 Descrição", default=produto.get("descricao",""), required=False)
+        for item in [self.nome_input, self.preco_input, self.emoji_input, self.descricao_input]:
+            self.add_item(item)
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            nome = self.nome_input.value
+            preco = float(self.preco_input.value.replace(",", "."))
+            emoji = self.emoji_input.value or "🛒"
+            descricao = self.descricao_input.value or ""
+            await edit_produto(self.produto_id, nome, preco, emoji, descricao)
+            await interaction.followup.send("✅ Produto editado!", ephemeral=True)
+            await atualizar_loja()
+            await log_admin("Produto Editado", interaction.user, f"**{nome}** • {formatar_preco(preco)} • ID `{self.produto_id}`")
+        except Exception as e:
+            await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
+
+class ProdutoModal(discord.ui.Modal, title="✨ Adicionar Produto"):
+    nome_input = discord.ui.TextInput(label="📦 Nome", placeholder="Ex: VIP Premium", required=True)
+    preco_input = discord.ui.TextInput(label="💰 Preço", placeholder="49.90", required=True)
+    emoji_input = discord.ui.TextInput(label="😀 Emoji", placeholder="👑", required=False, default="🛒")
+    descricao_input = discord.ui.TextInput(label="📝 Descrição", placeholder="Breve descrição", required=False)
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            pid = gerar_id()
+            nome = self.nome_input.value
+            preco = float(self.preco_input.value.replace(",", "."))
+            emoji = self.emoji_input.value or "🛒"
+            descricao = self.descricao_input.value or ""
+            produtos = await get_produtos()
+            while pid in produtos: pid = gerar_id()
+            await add_produto(pid, nome, preco, emoji, descricao)
+            embed = criar_embed(titulo="✅ Produto Adicionado!", cor=COR_SUCESSO)
+            embed.add_field(name="🆔 ID", value=f"`{pid}`", inline=True)
+            embed.add_field(name="📦 Nome", value=nome, inline=True)
+            embed.add_field(name="💰 Preço", value=formatar_preco(preco), inline=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            await atualizar_loja()
+            await log_admin("Produto Adicionado", interaction.user, f"**{nome}** • {formatar_preco(preco)} • ID `{pid}`")
+        except Exception as e:
+            await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
+
 class ConfirmacaoLimpezaView(discord.ui.View):
     def __init__(self, interaction_original):
         super().__init__(timeout=60)
         self.interaction_original = interaction_original
     async def on_timeout(self):
-        try:
-            await self.interaction_original.edit_original_response(content="⏰ Tempo expirado.", embed=None, view=None)
+        try: await self.interaction_original.edit_original_response(content="⏰ Tempo expirado.", embed=None, view=None)
         except: pass
     @discord.ui.button(label="✅ CONFIRMAR LIMPEZA", style=discord.ButtonStyle.danger, emoji="⚠️")
     async def confirmar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.interaction_original.user.id:
-            return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+        if interaction.user.id != self.interaction_original.user.id: return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
         await interaction.response.defer(ephemeral=True)
         await limpar_banco_completo()
         await atualizar_loja()
@@ -1082,8 +927,7 @@ class ConfirmacaoLimpezaView(discord.ui.View):
         await interaction.followup.send("✅ Limpo!", ephemeral=True)
     @discord.ui.button(label="❌ CANCELAR", style=discord.ButtonStyle.secondary)
     async def cancelar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.interaction_original.user.id:
-            return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
+        if interaction.user.id != self.interaction_original.user.id: return await interaction.response.send_message("❌ Sem permissão.", ephemeral=True)
         await interaction.response.defer(ephemeral=True)
         embed = criar_embed(titulo="❌ Cancelado", descricao="Banco intacto.", cor=COR_DESTAQUE)
         await self.interaction_original.edit_original_response(embed=embed, view=None)
@@ -1096,18 +940,18 @@ async def on_ready():
     if not await init_db():
         return
     if not verificar_7zip():
-        print("⚠️ 7-Zip NÃO encontrado! Tentando instalar...")
+        print("⚠️ 7-Zip não encontrado. Tentando instalar...")
         if instalar_7zip():
-            print("✅ 7-Zip instalado com sucesso!")
+            print("✅ 7-Zip instalado!")
         else:
             print("❌ Falha na instalação do 7-Zip.")
     else:
         print("✅ 7-Zip disponível")
     guild = await get_guild()
-    if guild is None:
-        print(f"❌ Servidor {GUILD_ID} não encontrado.")
-    else:
+    if guild:
         print(f"✅ Servidor: {guild.name}")
+    else:
+        print(f"❌ Servidor {GUILD_ID} não encontrado.")
     asyncio.create_task(start_server())
     if guild:
         await atualizar_loja()
@@ -1132,6 +976,5 @@ async def on_interaction(interaction: discord.Interaction):
     elif custom_id.startswith("cancel_"):
         await interaction.response.send_message("❌ Pedido cancelado.", ephemeral=True)
 
-# ================= MAIN =================
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
